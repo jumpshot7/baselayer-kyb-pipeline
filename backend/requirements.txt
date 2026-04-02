@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+httpx
+pydantic
+apache-beam[gcp]
+psycopg2-binary
+rapidfuzz
+python-dotenv
+boto3
+pytest
+pytest-asyncio
+httpx
