@@ -82,6 +82,10 @@ async def fetch_all_records(domain: str, dataset_id: str) -> list[dict]:
             
             all_records.extend(page)
             offset += PAGE_SIZE
+
+            if offset >= 100_000:  # Stop after 2 pages
+                logger.info("TESTING MODE: Stopping at 100k rows.")
+                break
     return all_records
 
 # Records to CSV

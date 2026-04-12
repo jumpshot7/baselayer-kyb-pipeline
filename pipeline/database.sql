@@ -53,9 +53,12 @@ CREATE TABLE IF NOT EXISTS nyc_dca_businesses(
 );
 
 -- Unique Constraints: prevent the same license from being inserted twice if the pipeline runs more than once
-ALTER TABLE nyc_dca_businesses
-    ADD CONSTRAINT uq_nyc_license_number
-    UNIQUE (license_number);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_nyc_license_number') THEN
+        ALTER TABLE nyc_dca_businesses ADD CONSTRAINT uq_nyc_license_number UNIQUE (license_number);
+    END IF;
+END $$;
 
 -- Indexes for the columns we'll query and join on most often
 CREATE INDEX IF NOT EXISTS idx_nyc_business_name
@@ -106,9 +109,12 @@ CREATE TABLE IF NOT EXISTS nys_corp_entities(
 );
 
 -- Unique constraint: one row per DOS entity ID
-ALTER TABLE nys_corp_entities
-    ADD CONSTRAINT uq_nys_dos_id
-    UNIQUE (dos_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_nys_dos_id') THEN
+        ALTER TABLE nys_corp_entities ADD CONSTRAINT uq_nys_dos_id UNIQUE (dos_id);
+    END IF;
+END $$;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nys_entity_name
@@ -160,9 +166,12 @@ CREATE TABLE IF NOT EXISTS kyb_anomalies(
 
 -- Unique constraint: one match result per NYC+NYS pair
 -- Prevents duplicate anomaly rows if pipeline reruns
-ALTER TABLE kyb_anomalies
-    ADD CONSTRAINT uq_anomaly_pair
-    UNIQUE (nyc_business_id, nys_entity_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_anomaly_pair') THEN
+        ALTER TABLE kyb_anomalies ADD CONSTRAINT uq_anomaly_pair UNIQUE (nyc_business_id, nys_entity_id);
+    END IF;
+END $$;
 
 -- Indexes for the API queries in api.py
 CREATE INDEX IF NOT EXISTS idx_anomalies_has_anomaly
