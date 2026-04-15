@@ -2,18 +2,21 @@
 execution.py
 
 Orchestrates the full KYB pipeline:
-1. Check if DB is already populated (skip if so)
-2. Create tables form database.sql
-3. Apache Beam pipeline - read GCS CSVs, validate, write to Postgres
-4. Fuzzy match NYC businesses against NYS entities
-5. Compute anomaly flags
-6. Write results to kyb_anomalies
+1. Create DB tables if they don't exist
+2. Check if DB is already populated (skip if so)
+3. Fetch raw CSVs from Socrate API -> upload to GCS (fetcher.py)
+4. Apache Beam pipeline - read GCS CSVm validate, write to Postgres
+5. Fuzzy match NYC businesses against NYS entites
+6. Compute anomaly flags
+7. Write results to kyb_anomalies
+
 """
 
 import csv
 import io
 import logging
 import os
+import time
 import psycopg2
 import apache_beam as beam
 import asyncio
@@ -24,6 +27,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from rapidfuzz import fuzz
 from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.io import ReadFromText
 from google.cloud import storage
 from fetcher import run as fetch_data
 
@@ -38,8 +42,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Section 1: Database Connection
-# All connection details come from .env
+# 1. Database Connection
 # psycopg2 is the standard Python driver for Postgres
 
 def get_conn():
@@ -51,6 +54,7 @@ def get_conn():
         password=os.getenv("POSTGRES_PASSWORD"),
     )
 
+# 2. Table setup
 # Reads database.sql and execute it against Postgres.
 
 def create_tables():
@@ -67,7 +71,7 @@ def create_tables():
     finally:
         conn.close()
 
-# Check if already populated
+# 3.Idempotency Check
 # If both source tables already have rows, the pipeline has already run. Skip to avoid duplicates.
 # This is what Docker uses to decide whether to run the pipeline or go straight to launching the API.
 def tables_are_populated() -> bool:
@@ -85,25 +89,65 @@ def tables_are_populated() -> bool:
     finally:
         conn.close()
 
-# GCS CSV Reader
-# Apache Beam's ReadFromText reads line by line.
-# We need to read CSV from GCS as a full file
-# Use csv.DictReader to parse headers.
-# This function downloads the CSV bytes from GCS, and yield one dict per pow - Beam processes each dict as a seperate element in the pipeline.
-def read_csv_from_gcs(bucket_name : str, blob_name : str):
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
+# 4. Beam DoFns
+# beam.io.ReadFromText("gs://bucket/file.csv")
+# Beam streams the file by line from GCS
+# Each line arrives in process() as a raw string
+# We parse the CSV string into a dict ourselves, then validate it into a Pydantic Model
 
-    content = blob.download_as_bytes()
-    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+# DoFn 1: Parse a raw CSV into a dict
+class ParseNycCsvLine(beam.DoFn):
+    """
+    Receives: a raw CSV string
+    Yields: a dict with column names as keys
+    
+    We store the headers from the first line and use them to parse every subsequent line
+    """
+    def start_bundle(self):
+        # Called once per bundle before any elements arrive.
+        # We reset state here so each bundle starts clean.
+        self.headers = None
+    
+    def process(self, element: str):
+        # element is a single CSV line as a string, e.g:
+        # '"1234567","JOE PIZZA LLC","ACTIVE","06/19/2025"
 
-    for row in reader:
-        yield dict(row)
+        # csv.reader handles quoted fields with commas inside them
+        row = next(csv.reader([element]))
 
-# Beam DoFn Classes
-# Do Function is Beam's unit of work. Single transform step in a pipeline. Each DoFn receives one element and yields 0 or more outputs.
-# Parse and ValidateNyc recieves a raw dict (one CSV row) passes it through the Pydantic model. and yields the validated model if it passes, nothing if failed.
+        if self.headers is None:
+            # First element in this bundle is the header row
+            # Store headers and don't yield anything
+            self.headers = row
+            return
+        
+        if len(row) != len(self.headers):
+            # Malformed line - skip it
+            logger.warning(f"Skipping malformed NYC line: {element[:80]}")
+            return
+        
+        yield dict(zip(self.headers, row))
+
+class ParseNysCsvLine(beam.DoFn):
+    """Same as above but for the NYS dataset."""
+ 
+    def start_bundle(self):
+        self.headers = None
+ 
+    def process(self, element: str):
+        row = next(csv.reader([element]))
+ 
+        if self.headers is None:
+            self.headers = row
+            return
+ 
+        if len(row) != len(self.headers):
+            logger.warning(f"Skipping malformed NYS line: {element[:80]}")
+            return
+ 
+        yield dict(zip(self.headers, row))
+
+# DoFn 2: Validate the dict into a Pydantic model
 class ParseAndValidateNyc(beam.DoFn):
     def process(self, element):
         result = parse_nyc_record(element)
@@ -120,12 +164,22 @@ class ParseAndValidateNys(beam.DoFn):
         else:
             logger.warning(f"Could not parse {element}")
 
+
+# DoFn 3: Write validated models to Postgres
 # WriteNycToPostgres recieves a validated NycDcaBusiness and inserts it into the nyc_dca_businesses table.
 # On conflict do nothing means if the license already exists (unique constraint), just skip it silently.
+
+MAX_RETRIES = 3
+RETRY_DELAY = 5 
+
 class WriteNycToPostgres(beam.DoFn):
-    def setup(self):
-        # set() is called once per worker before processing
-        # This is where we open the DB connection
+    """
+    Receives: validated NycDcaBusiness models
+    Writes: bulk INSERT per bundle into nyc_dca_businesses
+    """
+
+    def _connect(self):
+        # Open a fresh DB connection.
         self.conn = psycopg2.connect(
             host=os.getenv("POSTGRES_HOST"),
             port=os.getenv("POSTGRES_PORT", 5432),
@@ -133,56 +187,98 @@ class WriteNycToPostgres(beam.DoFn):
             user=os.getenv("POSTGRES_USER"),
             password=os.getenv("POSTGRES_PASSWORD"),
         )
-        self.batch_count = 0
+    
+    def setup(self):
+        # setup() is called once per worker before any bundles.
+        # Open the DB connection here.
+        self._connect()
 
     def teardown(self):
         # teardown() is called once per worker after processing
-        self.conn.close()
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+    
+    def start_bundle(self):
+        # Called before each bundle. Reset the batch accumaltor.
+        # This is where we collect rows before bulk inserting them
+        self.batch = []
     
     def process(self, element: NycDcaBusiness):
-        with self.conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO nyc_dca_businesses (
-                    license_number, business_name, dba_trade_name,
-                    business_unique_id, business_category, license_type,
-                    license_status, initial_issuance_date, expiration_date,
-                    contact_phone, building_number, street, city, state,
-                    zip_code, borough, latitude, longitude
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (license_number) DO NOTHING
-            """, (
-                element.license_number,
-                element.business_name,
-                element.dba_trade_name,
-                element.business_unique_id,
-                element.business_category,
-                element.license_type,
-                element.license_status,
-                element.initial_issuance_date,
-                element.expiration_date,
-                element.contact_phone,
-                element.building_number,
-                element.street,
-                element.city,
-                element.state,
-                element.zip_code,
-                element.borough,
-                element.latitude,
-                element.longitude,
-            ))
-        self.batch_count += 1
-        if self.batch_count % 500 == 0:
-            self.conn.commit()
+           self.batch.append((
+            element.license_number,
+            element.business_name,
+            element.dba_trade_name,
+            element.business_unique_id,
+            element.business_category,
+            element.license_type,
+            element.license_status,
+            element.initial_issuance_date,
+            element.expiration_date,
+            element.contact_phone,
+            element.building_number,
+            element.street,
+            element.city,
+            element.state,
+            element.zip_code,
+            element.borough,
+            element.latitude,
+            element.longitude,
+        ))
 
     def finish_bundle(self):
-        # Commits a batch of rows all at once (much faster!)
-        self.conn.commit()
+        # Called after all elements in a bundle have been processed.
+        # This is where we write to the DB - one bulk INSERT for the entire bundle
+        if not self.batch:
+            return
+        
+        sql = """
+            INSERT INTO nyc_dca_businesses (
+                license_number, business_name, dba_trade_name,
+                business_unique_id, business_category, license_type,
+                license_status, initial_issuance_date, expiration_date,
+                contact_phone, building_number, street, city, state,
+                zip_code, borough, latitude, longitude
+            ) VALUES %s
+            ON CONFLICT (license_number) DO NOTHING
+        """
+ 
+        # Retry logic: if the connection dropped, reconnect and try again
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Reconnect if connection was closed by Supabase
+                if self.conn.closed:
+                    logger.warning("Connection closed, reconnecting...")
+                    self._connect()
+ 
+                with self.conn.cursor() as cur:
+                    psycopg2.extras.execute_values(
+                        cur, sql, self.batch, page_size=500
+                    )
+                self.conn.commit()
+                logger.info(f"NYC: wrote bundle of {len(self.batch)} rows")
+                self.batch = []
+                return
+ 
+            except Exception as e:
+                logger.warning(f"NYC write failed (attempt {attempt + 1}): {e}")
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))  # exponential backoff
+                    self._connect()
+                else:
+                    logger.error("NYC write failed after all retries")
+                    raise
 
 class WriteNysToPostgres(beam.DoFn):
-    def setup(self):
+    """
+    Receives: validated NysCorpEntity models
+    Writes:   bulk INSERT per bundle into nys_corp_entities
+    """
+ 
+    def _connect(self):
         self.conn = psycopg2.connect(
             host=os.getenv("POSTGRES_HOST"),
             port=os.getenv("POSTGRES_PORT", 5432),
@@ -190,48 +286,89 @@ class WriteNysToPostgres(beam.DoFn):
             user=os.getenv("POSTGRES_USER"),
             password=os.getenv("POSTGRES_PASSWORD"),
         )
-        self.batch_count = 0
-
+ 
+    def setup(self):
+        self._connect()
+ 
     def teardown(self):
-        self.conn.close()
-
+        if self.conn and not self.conn.closed:
+            self.conn.close()
+ 
+    def start_bundle(self):
+        self.batch = []
+ 
     def process(self, element: NysCorpEntity):
-        with self.conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO nys_corp_entities (
-                    dos_id, current_entity_name, entity_type,
-                    dos_process_name, county, jurisdiction,
-                    date_of_formation, date_of_dissolution,
-                    street_address, city, state, zip_code
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (dos_id) DO NOTHING
-            """, (
-                element.dos_id,
-                element.current_entity_name,
-                element.entity_type,
-                element.dos_process_name,
-                element.county,
-                element.jurisdiction,
-                element.date_of_formation,
-                element.date_of_dissolution,
-                element.street_address,
-                element.city,
-                element.state,
-                element.zip_code,
-            ))
-        self.batch_count += 1
-        if self.batch_count % 500 == 0:
-            self.conn.commit()
-
+        self.batch.append((
+            element.dos_id,
+            element.current_entity_name,
+            element.entity_type,
+            element.dos_process_name,
+            element.county,
+            element.jurisdiction,
+            element.date_of_formation,
+            element.date_of_dissolution,
+            element.street_address,
+            element.city,
+            element.state,
+            element.zip_code,
+        ))
+ 
     def finish_bundle(self):
-        # Commits a batch of rows all at once (much faster!)
-        self.conn.commit()
+        if not self.batch:
+            return
+ 
+        sql = """
+            INSERT INTO nys_corp_entities (
+                dos_id, current_entity_name, entity_type,
+                dos_process_name, county, jurisdiction,
+                date_of_formation, date_of_dissolution,
+                street_address, city, state, zip_code
+            ) VALUES %s
+            ON CONFLICT (dos_id) DO NOTHING
+        """
+ 
+        for attempt in range(MAX_RETRIES):
+            try:
+                if self.conn.closed:
+                    logger.warning("Connection closed, reconnecting...")
+                    self._connect()
+ 
+                with self.conn.cursor() as cur:
+                    psycopg2.extras.execute_values(
+                        cur, sql, self.batch, page_size=500
+                    )
+                self.conn.commit()
+                logger.info(f"NYS: wrote bundle of {len(self.batch)} rows")
+                self.batch = []
+                return
+ 
+            except Exception as e:
+                logger.warning(f"NYS write failed (attempt {attempt + 1}): {e}")
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+                    self._connect()
+                else:
+                    logger.error("NYS write failed after all retries")
+                    raise
 
 # Run Beam Pipelines
-# This runs two seperate Beam pipelines- one for each dataset. DirectRunner means means it runs locally on your machine.
-# When you move to production we will swap to DataflowRunner to run it on Google Cloud Dataflow.
+# Pipeline will read from GCS like this: beam.io.ReadFromText("gs://bucket/file.csv")
+# This is Beam's native GCS reader. It:
+#   - Opens the file directly from GCS
+#   - Streams it line by line
+#   - Automatically handles GCS authentication via GOOGLE_APLICATION_CREDENTIALS
+
+# The first line is the CSV header. ParseCsvLine DoFn handles this by storing the first line as headers
+# Pipeline flow
+# GCS file
+#   -> ReadFromText     (strings, one per line)
+#   -> ParseCsvLine     (dicts, one per row)
+#   -> ParseAndValidate     (Pydantic models, invalid rows dropped)
+#   -> WriteToDB        (bulk INSERT per bundle)
 def run_beam_pipelines():
     bucket_name = os.getenv("GCS_BUCKET_NAME")
     options = PipelineOptions(runner="DirectRunner")
@@ -241,28 +378,46 @@ def run_beam_pipelines():
     with beam.Pipeline(options=options) as p:
         (
             p
-            | "ReadNycRow" >> beam.Create(
-                list(read_csv_from_gcs(bucket_name, "raw/nyc-dca-businesses.csv"))
-                )
+            # Step 1: Read the CSV from GCS, line by line.
+            # Each element in the PCollection is one string
+            | "ReadNycCsv" >> ReadFromText(
+                f"gs://{bucket_name}/raw/nyc-dca-businesses.csv"
+            )
+
+            # Step 2: Parse each CSV string into a dict.
+            # Input: raw string e.g '"1234","JOE PIZZA","Active",..'
+            # Output: dict      e.g{"license_nbr":"1234","business_name": "JOE PIZZA",...}
+            | "ParseNycCsv" >> beam.ParDo(ParseNycCsvLine())
+
+            # Step 3: Validate each dict into a Pydantic model.
+            # Input: dict
+            # Output: NycDcaBusiness (or nothing if validation fails)
             | "ValidateNyc" >> beam.ParDo(ParseAndValidateNyc())
+
+            # Step 4: Write to Postgres in bulk batches.
+            # Input: NycDcaBusiness models
+            # Output: nothing (side effect: rows in DB)
             | "WriteNycToDB" >> beam.ParDo(WriteNycToPostgres())   
         )
     logger.info("NYC pipeline complete")
 
     # NYS Pipeline
     logger.info("Running Beam pipeline for NYS corporations...")
+ 
     with beam.Pipeline(options=options) as p:
         (
             p
-            | "ReadNysRows"     >> beam.Create(
-                                    list(read_csv_from_gcs(bucket_name, "raw/nys-corporations.csv"))
-                                  )
-            | "ValidateNys"     >> beam.ParDo(ParseAndValidateNys())
-            | "WriteNysToDB"    >> beam.ParDo(WriteNysToPostgres())
+            | "ReadNysCsv"    >> ReadFromText(
+                f"gs://{bucket_name}/raw/nys-corporations.csv"
+            )
+            | "ParseNysCsv"   >> beam.ParDo(ParseNysCsvLine())
+            | "ValidateNys"   >> beam.ParDo(ParseAndValidateNys())
+            | "WriteNysToDB"  >> beam.ParDo(WriteNysToPostgres())
         )
+ 
     logger.info("NYS pipeline complete")
 
-# Fuzzy Matching + Anomaly Detection
+# 6. Fuzzy Matching + Anomaly Detection
 # Load both tables from Postgres into memory. Group by zipcode to avoid comparing every NYC business against every NYS business/
 # Any pair with a match score >= 85 gets anomaly flags computed.
 
@@ -360,7 +515,7 @@ def run_fuzzy_matching():
         for nyc_row in nyc_rows:
             nyc_id = nyc_row[0]
             nyc_name = nyc_row[1] or ""
-            nyc_zip = nyc_row[6]
+            nyc_zip = nyc_row[5]
 
             # Only compare against NYS entities in the same zip
             candidates = nys_by_zip.get(nyc_zip, [])
@@ -382,7 +537,7 @@ def run_fuzzy_matching():
                         "license_status": nyc_row[2],
                         "initial_issuance_date": nyc_row[3],
                         "expiration_date": nyc_row[4],
-                        "zip_code": nyc_row[6],
+                        "zip_code": nyc_row[5],
                     })()
 
                     nys_obj = type("NYS", (), {
@@ -401,13 +556,13 @@ def run_fuzzy_matching():
                         **flags,
                     })
 
-                logger.info(f"Found {len(anomalies)} matches above threshold {MATCH_THRESHOLD}")
-                return anomalies
+        logger.info(f"Found {len(anomalies)} matches above threshold {MATCH_THRESHOLD}")
+        return anomalies
                 
     finally:
         conn.close()
 
-# Write Anomalies to Postgres
+#7. Write Anomalies to Postgres
 def write_anomalies(anomalies: list[dict]):
     if not anomalies:
         logger.info("No anomalies to write")
@@ -442,7 +597,7 @@ def write_anomalies(anomalies: list[dict]):
     finally:
         conn.close()
 
-# Orchestrator
+# 8. Orchestrator
 def run():
     logger.info("=== execution.py starting ===")
 
