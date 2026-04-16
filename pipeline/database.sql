@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS nyc_dca_businesses(
     -- Core identity
     license_number TEXT NOT NULL,
     business_name TEXT NOT NULL,
-    dba_trade_name TEXT,
     business_unique_id TEXT,
 
     -- License details
@@ -94,9 +93,8 @@ CREATE TABLE IF NOT EXISTS nys_corp_entities(
     county                TEXT,
     jurisdiction          TEXT,
 
-    -- Dates — dissolution date is critical for anomaly logic
+    -- Dates
     date_of_formation     DATE,
-    date_of_dissolution   DATE,
 
     -- Address
     street_address        TEXT,
@@ -119,9 +117,6 @@ END $$;
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_nys_entity_name
     ON nys_corp_entities (current_entity_name);
-
-CREATE INDEX IF NOT EXISTS idx_nys_dissolution_date
-    ON nys_corp_entities (date_of_dissolution);
 
 CREATE INDEX IF NOT EXISTS idx_nys_dos_process_name
     ON nys_corp_entities (dos_process_name);

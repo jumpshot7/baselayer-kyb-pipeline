@@ -32,7 +32,6 @@ class NycDcaBusiness(BaseModel):
     # Core identity fields
     license_number: str = Field(..., alias="license_nbr")
     business_name: str = Field(..., alias="business_name")
-    dba_trade_name: Optional[str] = Field(None, alias="dba_trade_name")
     business_unique_id: Optional[str] = Field(None, alias="business_unique_id")
 
     # License details
@@ -93,28 +92,26 @@ class NycDcaBusiness(BaseModel):
     # Section 2: NY State Corporation Model
 
 class NysCorpEntity(BaseModel):
-    # Core identity
+     # Core identity
     dos_id:               str            = Field(..., alias="dos_id")
     current_entity_name:  str            = Field(..., alias="current_entity_name")
     entity_type:          Optional[str]  = Field(None, alias="entity_type")
-
-    # Status — this is the key field for anomaly detection
-    # e.g. "Active", "Inactive", "Dissolved"
-    dos_process_name:     Optional[str]  = Field(None, alias="dos_process_name")
     county:               Optional[str]  = Field(None, alias="county")
     jurisdiction:         Optional[str]  = Field(None, alias="jurisdiction")
 
+    # Registered Agent / Process
+    dos_process_name:     Optional[str]  = Field(None, alias="dos_process_name")
+
     # Dates
-    date_of_formation:    Optional[date] = Field(None, alias="dos_process_location_date") # Note: Assuming this maps to formation based on typical DOS API
-    date_of_dissolution:  Optional[date] = Field(None, alias="date_of_dissolution") # Leave as is if it matches or adjust if DOS API changes it
+    date_of_formation:    Optional[date] = Field(None, alias="initial_dos_filing_date") 
 
     # Address
-    street_address:       Optional[str]  = Field(None, alias="dos_process_location_address")
-    city:                 Optional[str]  = Field(None, alias="dos_process_location_city")
-    state:                Optional[str]  = Field(None, alias="dos_process_location_state")
-    zip_code:             Optional[str]  = Field(None, alias="dos_process_location_zip")
+    street_address:       Optional[str]  = Field(None, alias="dos_process_address_1")
+    city:                 Optional[str]  = Field(None, alias="dos_process_city")
+    state:                Optional[str]  = Field(None, alias="dos_process_state")
+    zip_code:             Optional[str]  = Field(None, alias="dos_process_zip")
 
-    @field_validator("date_of_formation", "date_of_dissolution", mode="before")
+    @field_validator("date_of_formation", mode="before")
     @classmethod
     def parse_date(cls, v):
         if not v or v == "":

@@ -34,7 +34,7 @@ NYS_DOMAIN = "data.ny.gov"
 NYS_DATASET = "p3qf-k9ut" # NY State Corporations & Entites
 
 # Socrata hard maximum is 50k records per request, so loop with this page size until we have everything
-PAGE_SIZE = 50_000
+
 
 # Read bucket name from .env
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
@@ -83,9 +83,6 @@ async def fetch_all_records(domain: str, dataset_id: str) -> list[dict]:
             all_records.extend(page)
             offset += PAGE_SIZE
 
-            if offset >= 100_000:  # Stop after 2 pages
-                logger.info("TESTING MODE: Stopping at 100k rows.")
-                break
     return all_records
 
 # Records to CSV

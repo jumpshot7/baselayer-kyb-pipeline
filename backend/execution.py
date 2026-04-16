@@ -18,6 +18,7 @@ import logging
 import os
 import time
 import psycopg2
+import psycopg2.extras
 import apache_beam as beam
 import asyncio
 
@@ -103,15 +104,13 @@ class ParseNycCsvLine(beam.DoFn):
     
     We store the headers from the first line and use them to parse every subsequent line
     """
-    def start_bundle(self):
-        # Called once per bundle before any elements arrive.
-        # We reset state here so each bundle starts clean.
-        self.headers = None
+    def __init__(self, headers):
+        self.headers = headers
     
     def process(self, element: str):
         # element is a single CSV line as a string, e.g:
         # '"1234567","JOE PIZZA LLC","ACTIVE","06/19/2025"
-
+        print(f"Read line: {element[:50]}...")
         # csv.reader handles quoted fields with commas inside them
         row = next(csv.reader([element]))
 
@@ -131,8 +130,8 @@ class ParseNycCsvLine(beam.DoFn):
 class ParseNysCsvLine(beam.DoFn):
     """Same as above but for the NYS dataset."""
  
-    def start_bundle(self):
-        self.headers = None
+    def __init__(self, headers):
+        self.headers = headers
  
     def process(self, element: str):
         row = next(csv.reader([element]))
@@ -207,7 +206,6 @@ class WriteNycToPostgres(beam.DoFn):
            self.batch.append((
             element.license_number,
             element.business_name,
-            element.dba_trade_name,
             element.business_unique_id,
             element.business_category,
             element.license_type,
@@ -233,7 +231,7 @@ class WriteNycToPostgres(beam.DoFn):
         
         sql = """
             INSERT INTO nyc_dca_businesses (
-                license_number, business_name, dba_trade_name,
+                license_number, business_name,
                 business_unique_id, business_category, license_type,
                 license_status, initial_issuance_date, expiration_date,
                 contact_phone, building_number, street, city, state,
@@ -306,7 +304,6 @@ class WriteNysToPostgres(beam.DoFn):
             element.county,
             element.jurisdiction,
             element.date_of_formation,
-            element.date_of_dissolution,
             element.street_address,
             element.city,
             element.state,
@@ -321,7 +318,7 @@ class WriteNysToPostgres(beam.DoFn):
             INSERT INTO nys_corp_entities (
                 dos_id, current_entity_name, entity_type,
                 dos_process_name, county, jurisdiction,
-                date_of_formation, date_of_dissolution,
+                date_of_formation,
                 street_address, city, state, zip_code
             ) VALUES %s
             ON CONFLICT (dos_id) DO NOTHING
@@ -369,10 +366,27 @@ class WriteNysToPostgres(beam.DoFn):
 #   -> ParseCsvLine     (dicts, one per row)
 #   -> ParseAndValidate     (Pydantic models, invalid rows dropped)
 #   -> WriteToDB        (bulk INSERT per bundle)
+
+def get_csv_headers(bucket_name, blob_name):
+    """Downloads just the first 2000 bytes of the CSV from GCS to extract headers."""
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    first_bytes = blob.download_as_bytes(start=0, end=2000)
+    first_line = first_bytes.decode('utf-8').split('\n')[0]
+    return next(csv.reader([first_line]))
+
 def run_beam_pipelines():
     bucket_name = os.getenv("GCS_BUCKET_NAME")
-    options = PipelineOptions(runner="DirectRunner")
+    options = PipelineOptions([
+        "--runner=DirectRunner",
+        "--direct_num_workers=1",
+        "--direct_running_mode=multi_threading"
+    ])
 
+    nyc_headers = get_csv_headers(bucket_name, "raw/nyc-dca-businesses.csv")
+    nys_headers = get_csv_headers(bucket_name, "raw/nys-corporations.csv")
+    
     # NYC Pipeline
     logger.info("Running Beam pipeline for NYC DCA businesses...")
     with beam.Pipeline(options=options) as p:
@@ -381,13 +395,14 @@ def run_beam_pipelines():
             # Step 1: Read the CSV from GCS, line by line.
             # Each element in the PCollection is one string
             | "ReadNycCsv" >> ReadFromText(
-                f"gs://{bucket_name}/raw/nyc-dca-businesses.csv"
+                f"gs://{bucket_name}/raw/nyc-dca-businesses.csv", 
+                skip_header_lines=1
             )
 
             # Step 2: Parse each CSV string into a dict.
             # Input: raw string e.g '"1234","JOE PIZZA","Active",..'
             # Output: dict      e.g{"license_nbr":"1234","business_name": "JOE PIZZA",...}
-            | "ParseNycCsv" >> beam.ParDo(ParseNycCsvLine())
+            | "ParseNycCsv" >> beam.ParDo(ParseNycCsvLine(nyc_headers))
 
             # Step 3: Validate each dict into a Pydantic model.
             # Input: dict
@@ -408,9 +423,10 @@ def run_beam_pipelines():
         (
             p
             | "ReadNysCsv"    >> ReadFromText(
-                f"gs://{bucket_name}/raw/nys-corporations.csv"
+                f"gs://{bucket_name}/raw/nys-corporations.csv", 
+                skip_header_lines=1
             )
-            | "ParseNysCsv"   >> beam.ParDo(ParseNysCsvLine())
+            | "ParseNysCsv"   >> beam.ParDo(ParseNysCsvLine(nys_headers))
             | "ValidateNys"   >> beam.ParDo(ParseAndValidateNys())
             | "WriteNysToDB"  >> beam.ParDo(WriteNysToPostgres())
         )
@@ -427,35 +443,16 @@ def years_since(d: date) -> float:
     """Return how many years have passed since a given date."""
     return (date.today() - d).days / 365.25
 
-def compute_anomaly_flags(nyc: NycDcaBusiness, nys: NysCorpEntity) -> dict:
-    """
-    Compute all four anomaly flags for a matched pair.
-    Returns a dict of flag name -> bool.
-    """
-
-    # Flag 1: License active but entity is dissolved
-    flag_dissolved = (
-        nyc.license_status is not None and
-        nyc.license_status.lower() == "active" and
-        nys.date_of_dissolution is not None
-    )
+def compute_anomaly_flags(nyc, nys):
+    # We cannot compute these without status/dissolution data, so default to False
+    flag_dissolved = False
+    flag_dormant = False
 
     # Flag 2: License issued before entity was formed
     flag_predates = (
         nyc.initial_issuance_date is not None and
         nys.date_of_formation is not None and
         nyc.initial_issuance_date < nys.date_of_formation
-    )
-
-    # Flag 3: Entity dormant - active license but entity
-    # hasn't dissolved yet. Has been around 3+ years with no sign of acitivity (no dissolution date field)
-    flag_dormant = (
-        nyc.license_status is not None and
-        nyc.license_status.lower() == "active" and
-        getattr(nys, "dos_process_name", "") == "Inactive" and
-        nys.date_of_dissolution is None and
-        nys.date_of_formation is not None and
-        years_since(nys.date_of_formation) >= 3
     )
 
     # Flag 4: Zip code mismatch between license and registered entity address
@@ -494,7 +491,7 @@ def run_fuzzy_matching():
             # Load NYS entities - only fields we need
             cur.execute("""
                 SELECT id, current_entity_name, dos_process_name,
-                date_of_formation, date_of_dissolution, zip_code
+                date_of_formation, zip_code
                 FROM nys_corp_entities
                 """)
             nys_rows = cur.fetchall()
@@ -505,7 +502,7 @@ def run_fuzzy_matching():
         # NYS entities, we only compare within the same zip code
         nys_by_zip = {}
         for row in nys_rows:
-            zip_code = row[5]
+            zip_code = row[4]
             if zip_code not in nys_by_zip:
                 nys_by_zip[zip_code] = []
             nys_by_zip[zip_code].append(row)
@@ -543,8 +540,7 @@ def run_fuzzy_matching():
                     nys_obj = type("NYS", (), {
                         "dos_process_name": nys_row[2],
                         "date_of_formation": nys_row[3],
-                        "date_of_dissolution": nys_row[4],
-                        "zip_code": nys_row[5],
+                        "zip_code": nys_row[4],
                     })()
 
                     flags = compute_anomaly_flags(nyc_obj, nys_obj)
