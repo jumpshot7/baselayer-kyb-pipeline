@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS nys_corp_entities(
     -- Core identity
     dos_id TEXT NOT NULL,
     current_entity_name TEXT NOT NULL,
+    initial_dos_filing_date TEXT,
     entity_type TEXT,
 
     -- Status — key field for anomaly detection

@@ -1,167 +1,66 @@
 """
 fetcher.py
 
-Fetches two datasets from Socrata open data APIs:
-  1. NYC DCA Legally Operating Businesses (data.cityofnewyork.us)
-  2. NY State Corporations & Entities (data.ny.gov)
-
-Paginates through all records using httpx, then uploads
-each dataset as a CSV to a GCS bucket.
+Downloads the full datasets as CSVs directly from Socrata's bulk export endpoints
+and streams them directly to Google Cloud Storage to prevent Out-Of-Memory errors.
 """
 
-import asyncio
-import csv
-import io
 import logging
 import os
-
-import httpx
+import requests
 from dotenv import load_dotenv
 from google.cloud import storage
 
-# Section 1: Config
-# load_dotenv() reads your .env file and makes all the variables inside it available via os.getenv()
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Socrata dataset identifiers
 NYC_DOMAIN = "data.cityofnewyork.us"
-NYC_DATASET = "w7w3-xahh" # NYC DCA Legally Operating Business
+NYC_DATASET = "w7w3-xahh" 
 
 NYS_DOMAIN = "data.ny.gov"
-NYS_DATASET = "p3qf-k9ut" # NY State Corporations & Entites
+NYS_DATASET = "n9v6-gdp6" 
 
-# Socrata hard maximum is 50k records per request, so loop with this page size until we have everything
-
-
-# Read bucket name from .env
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
-# Section 2: The Paginator
-# Ask for page 1 (offset 0), then page 2 (offset 50000), then page 3 (offset 100000), and so until a page comes back empty
-# httpx.AsyncClient is like the 'requests' library but async.
-
-async def fetch_all_records(domain: str, dataset_id: str) -> list[dict]:
+def stream_socrata_to_gcs(domain: str, dataset_id: str, blob_name: str) -> str:
     """
-    Paginate through an entire Socrata dataset.
-
-    Args:
-        domain:     e.g. "data.cityofnewyork.us"
-        dataset_id: e.g. "w7w3-xahh"
-
-    Returns:
-        All records as a list of dicts
+    Downloads a Socrata dataset using the Bulk CSV Export endpoint and streams
+    it directly to GCS so we don't hold 30 million rows in memory.
     """
-    url = f"https://{domain}/resource/{dataset_id}.json"
-    all_records = []
-    offset = 0
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        while True:
-            params = {
-                "$limit": PAGE_SIZE,
-                "$offset": offset,
-                "$order": ":id" # consistent ordering across pages
-            }
-
-            logger.info(f"Fetching {domain}/{dataset_id} | offset={offset} | total so far={len(all_records)}")
-
-            response = await client.get(url, params=params)
-
-            # If the API returns an error, raise_forstauts() will crash loudly so we know
-            response.raise_for_status()
-
-            page = response.json()
-
-            # Empty page means we've fected all records
-            if not page:
-                logger.info(f"Finished {dataset_id}. Total records: {len(all_records)}")
-                break
-            
-            all_records.extend(page)
-            offset += PAGE_SIZE
-
-    return all_records
-
-# Records to CSV
-# API returns a list of dicts like [{"business_name": "Joe's Pizza", "license": "123"}, ...]
-# Need to convert this to a CSV
-# Use io.StringIO -- lives in memory
-
-def records_to_csv_bytes(records: list[dict]) -> bytes:
-    '''
-    Convert a list of dicts into CSV bytes in memory.
-    The keys of the first record become the column headers.
-    '''
-    if not records:
-        return b""
-
-    output = io.StringIO()
-    headers = list(records[0].keys())
-    writer = csv.DictWriter(output, fieldnames=headers, extrasaction="ignore")
-
-    writer.writeheader()
-    writer.writerows(records)
-
-    # Encode string to bytes so GCS can store it
-    return output.getvalue().encode("utf-8")
-
-## Upload to GCS
-# Use google-cloud-storage python library
-# storage.clinet() automtically reads creds from GOOGLE_APPLICATION_CREDENTIALS env variable which points to gcp-credentials.json
-# A "blob" in GCS is just a file. You give it a name (the path inside the bucket) and upload bytes to it.
-def upload_to_gcs(data: bytes, blob_name: str) -> str:
-    '''
-    Upload bytes to GCS and return the gs:// URL.
-
-    Args:
-        data: CSV file as bytes
-        blob_name: path inside the bucket e.g "raw/nyc-dca-businesses.csv"
-
-    Returns:
-        GCS Url like gs://baselayer-kyb-raw-data/raw/nyc-dca-businesses.csv
-    '''
-
+    # Socrata's hidden bulk CSV download URL
+    url = f"https://{domain}/api/views/{dataset_id}/rows.csv?accessType=DOWNLOAD"
+    
+    logger.info(f"Starting bulk download for {dataset_id}...")
+    
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob(blob_name)
-    blob.upload_from_string(data, content_type="text/csv")
 
+    # Socrata send bulk files as GZIp. Set headers to ask for identity
+    # or let requests decompress it. Setting stream=True and reading it
+    # via response.raw bypasses requests automatic decompression.
+    headers = {"Accept-Encoding": "identity"}
+    with requests.get(url, stream=True, headers=headers, timeout=120) as response:
+        response.raise_for_status()
+        
+        # Upload the stream directly to Google Cloud Storage
+        # upload_from_file reads the network stream piece by piece
+        blob.upload_from_file(response.raw, content_type="text/csv")
+        
     gcs_url = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
-    logger.info(f"Uploaded -> {gcs_url}")
+    logger.info(f"Successfully streamed {dataset_id} directly to -> {gcs_url}")
     return gcs_url
 
-# Orchestrator
-# Tie all 3 functions together. Fetch both datasets, convert them to CSV, upload them to GCS
-# The URLs returned here (gs://...) are what models.py will use in the next step to read the files with Apache Beam
-async def run() -> tuple[str, str]:
-    logger.info("== Fetcher starting ===")
+def run():
+    logger.info("=== Fetcher starting ===")
 
-    # Dataset 1: NYC DCA Business
-    logger.info("--- Fetching NYC DCA Legally Operating Businesses ---")
-    nyc_records = await fetch_all_records(NYC_DOMAIN, NYC_DATASET)
-    nyc_csv = records_to_csv_bytes(nyc_records)
-    nyc_url = upload_to_gcs(nyc_csv, "raw/nyc-dca-businesses.csv")
-    logger.info(f"NYC done | rows={len(nyc_records)} | url={nyc_url}")
-
-    # Dataset 2: NY State Corporations
-    logger.info("--- Fetching NY State Corporations & Entities ---")
-    nys_records = await fetch_all_records(NYS_DOMAIN, NYS_DATASET)
-    nys_csv = records_to_csv_bytes(nys_records)
-    nys_url = upload_to_gcs(nys_csv, "raw/nys-corporations.csv")
-    logger.info(f"NYS done | rows={len(nys_records)} | url={nys_url}")
+    # Since this is no longer async, we just call the functions directly
+    nyc_url = stream_socrata_to_gcs(NYC_DOMAIN, NYC_DATASET, "raw/nyc-dca-businesses.csv")
+    nys_url = stream_socrata_to_gcs(NYS_DOMAIN, NYS_DATASET, "raw/nys-corporations.csv")
 
     logger.info("=== Fetcher complete ===")
-    logger.info(f"NYC -> {nyc_url}")
-    logger.info(f"NYS -> {nys_url}")
-
     return nyc_url, nys_url
 
-# Entry Point
-# asyncio.run() is required to execute async Python code.
-# When Python sees 'async def' it needs asyncio to actually run it
-# When Docker runs 'python fetcher.py' this is the line that kicks everything off.
 if __name__ == "__main__":
-    asyncio.run(run())
+    run()

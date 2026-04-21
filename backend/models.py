@@ -30,33 +30,23 @@ class NycDcaBusiness(BaseModel):
     model_config = ConfigDict(populate_by_name=True)  
     
     # Core identity fields
-    license_number: str = Field(..., alias="license_nbr")
-    business_name: str = Field(..., alias="business_name")
-    business_unique_id: Optional[str] = Field(None, alias="business_unique_id")
-
-    # License details
-    business_category: Optional[str] = Field(None, alias="business_category")
-    license_type: Optional[str] = Field(None, alias="license_type")
-    license_status: Optional[str] = Field(None, alias="license_status")
-
-    # Dates - stored as Python date object, not raw strings
-    initial_issuance_date: Optional[date] = Field(None, alias="license_creation_date")
-    expiration_date: Optional[date] = Field(None, alias="lic_expir_dd")
-
-    # Contact
-    contact_phone: Optional[str] = Field(None, alias="contact_phone")
-
-    # Address
-    building_number: Optional[str] = Field(None, alias="address_building", description = "Building Number")
-    street: Optional[str] = Field(None, alias="address_street_name")
-    city:                 Optional[str]  = Field(None, alias="address_city")
-    state:                Optional[str]  = Field(None, alias="address_state")
-    zip_code:             Optional[str]  = Field(None, alias="address_zip")
-    borough:              Optional[str]  = Field(None, alias="address_borough")
-
-    # Geo
-    latitude:             Optional[float] = Field(None, alias="latitude")
-    longitude:            Optional[float] = Field(None, alias="longitude")
+    license_number: str = Field(..., alias="License Number")
+    business_name: str = Field(..., alias="Business Name")
+    business_unique_id: Optional[str] = Field(None, alias="Business Unique ID")
+    business_category: Optional[str] = Field(None, alias="Business Category")
+    license_type: Optional[str] = Field(None, alias="License Type")
+    license_status: Optional[str] = Field(None, alias="License Status")
+    initial_issuance_date: Optional[date] = Field(None, alias="Initial Issuance Date")
+    expiration_date: Optional[date] = Field(None, alias="Expiration Date")
+    contact_phone: Optional[str] = Field(None, alias="Contact Phone")
+    building_number: Optional[str] = Field(None, alias="Building Number")
+    street: Optional[str] = Field(None, alias="Street1")
+    city: Optional[str]  = Field(None, alias="City")
+    state: Optional[str]  = Field(None, alias="State")
+    zip_code: Optional[str]  = Field(None, alias="ZIP Code")
+    borough: Optional[str]  = Field(None, alias="Borough")
+    latitude: Optional[float] = Field(None, alias="Latitude")
+    longitude: Optional[float] = Field(None, alias="Longitude")
 
     # Validators
     # Socrata returns dates as a string like "06/19/2026"
@@ -93,23 +83,24 @@ class NycDcaBusiness(BaseModel):
 
 class NysCorpEntity(BaseModel):
      # Core identity
-    dos_id:               str            = Field(..., alias="dos_id")
-    current_entity_name:  str            = Field(..., alias="current_entity_name")
-    entity_type:          Optional[str]  = Field(None, alias="entity_type")
-    county:               Optional[str]  = Field(None, alias="county")
-    jurisdiction:         Optional[str]  = Field(None, alias="jurisdiction")
+    dos_id:               str            = Field(..., alias="DOS ID")
+    current_entity_name:  str            = Field(..., alias="Current Entity Name")
+    initial_dos_filing_date:  str        = Field(..., alias="Initial DOS Filing Date")
+    county:               Optional[str]  = Field(None, alias="County")
+    jurisdiction:         Optional[str]  = Field(None, alias="Jurisdiction")
+    entity_type:          Optional[str]  = Field(None, alias="Entity Type")
 
     # Registered Agent / Process
-    dos_process_name:     Optional[str]  = Field(None, alias="dos_process_name")
+    dos_process_name:     Optional[str]  = Field(None, alias="DOS Process Name")
 
     # Dates
-    date_of_formation:    Optional[date] = Field(None, alias="initial_dos_filing_date") 
+    date_of_formation:    Optional[date] = Field(None, alias="Initial DOS Filing Date") 
 
     # Address
-    street_address:       Optional[str]  = Field(None, alias="dos_process_address_1")
-    city:                 Optional[str]  = Field(None, alias="dos_process_city")
-    state:                Optional[str]  = Field(None, alias="dos_process_state")
-    zip_code:             Optional[str]  = Field(None, alias="dos_process_zip")
+    street_address:       Optional[str]  = Field(None, alias="DOS Process Address 1")
+    city:                 Optional[str]  = Field(None, alias="DOS Process City")
+    state:                Optional[str]  = Field(None, alias="DOS Process State")
+    zip_code:             Optional[str]  = Field(None, alias="DOS Process Zip")
 
     @field_validator("date_of_formation", mode="before")
     @classmethod

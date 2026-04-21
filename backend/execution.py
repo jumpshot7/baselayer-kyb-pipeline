@@ -299,6 +299,7 @@ class WriteNysToPostgres(beam.DoFn):
         self.batch.append((
             element.dos_id,
             element.current_entity_name,
+            element.initial_dos_filing_date,
             element.entity_type,
             element.dos_process_name,
             element.county,
@@ -316,7 +317,7 @@ class WriteNysToPostgres(beam.DoFn):
  
         sql = """
             INSERT INTO nys_corp_entities (
-                dos_id, current_entity_name, entity_type,
+                dos_id, current_entity_name, initial_dos_filing_date, entity_type,
                 dos_process_name, county, jurisdiction,
                 date_of_formation,
                 street_address, city, state, zip_code
@@ -491,7 +492,7 @@ def run_fuzzy_matching():
             # Load NYS entities - only fields we need
             cur.execute("""
                 SELECT id, current_entity_name, dos_process_name,
-                date_of_formation, zip_code
+                date_of_formation, zip_code, initial_dos_filing_date
                 FROM nys_corp_entities
                 """)
             nys_rows = cur.fetchall()
@@ -608,8 +609,7 @@ def run():
     # Fetch data from socrata to gcs
     logger.info("Fetching raw data from Socrata...")
     try:
-        # Run the async fetcher from synchronous code
-        asyncio.run(fetch_data())
+       fetch_data()
     except Exception as e:
         logger.error(f"Failed to fetch Socrata data: {e}")
         return
