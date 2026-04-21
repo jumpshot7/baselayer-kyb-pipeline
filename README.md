@@ -1,37 +1,44 @@
-# baselayer-kyb-pipeline
+# KYB Compliance Pipeline
 
-Execution.py 
-GCS (two CSV files)
-        ↓
-Apache Beam reads both files
-        ↓
-Pydantic validates every row
-        ↓
-Valid records written to Postgres
-(nyc_dca_businesses + nys_corp_entities)
-        ↓
-Fuzzy matching runs across both tables
-        ↓
-Anomaly flags computed
-        ↓
-Results written to kyb_anomalies
+This project is a Know Your Business (KYB) compliance pipeline. It cross-references NYC business licenses (fetched from Socrata) against New York State (NYS) corporate entities to detect compliance anomalies, such as dissolved entities still holding active licenses, address mismatches, or entities formed after their license was issued.
 
-The Key Complexity Warning
-The fuzzy matching step (Step 4) is an O(n × m) operation — every NYC business compared against every NYS entity. With ~100k NYC records and ~4M NYS records that's potentially 400 billion comparisons if done naively.
-We'll handle this with two optimizations:
+## Architecture & Tech Stack
 
-Zip code pre-filtering — only compare businesses in the same zip code
-Threshold cutoff — stop comparing once we find a good enough match
+The project is split into three main components:
 
-This brings it down to something manageable.
+*   **Data Pipeline (`pipeline/` and `backend/`)**: 
+    *   Downloads raw CSV datasets from Socrata directly to Google Cloud Storage (GCS).
+    *   Uses Apache Beam to stream, process, and validate the data (via Pydantic) into a PostgreSQL database.
+    *   Runs fuzzy matching (optimized by zip code pre-filtering) to compare NYC businesses against NYS entities and compute anomaly flags.
+*   **Backend API (`backend/api.py`)**: 
+    *   A FastAPI application that queries the processed anomaly and entity data from Postgres.
+*   **Frontend (`frontend/`)**: 
+    *   A Next.js dashboard to visualize the anomalies and compliance results.
 
-# Section 1: DB connection helpers
-# Section 2: Table creation from database.sql
-# Section 3: Check if already populated
-# Section 4: Beam DoFn classes (the transform units)
-# Section 5: Run Beam pipeline for NYC dataset
-# Section 6: Run Beam pipeline for NYS dataset
-# Section 7: Fuzzy matching + anomaly detection
-# Section 8: Write anomalies to Postgres
-# Section 9: Orchestrator (ties everything together)
-# Section 10: Entry point
+## Prerequisites
+
+Before you begin, ensure you have the following installed and configured:
+*   Docker and Docker Compose
+*   **GCP Credentials**: Save a valid Google Cloud service account key as `gcp-credentials.json` inside the `backend/` directory.
+
+## Getting Started
+
+The entire application is containerized with Docker Compose. To spin up the database, run the initial data pipeline, and start the API and frontend, run:
+
+```bash
+docker-compose up --build
+```
+
+Wait for the ingestion pipeline to complete to view the compliance metrics. Once everything is running, access the services at:
+*   **Frontend Dashboard**: http://localhost:3000
+*   **Backend API (Swagger UI)**: http://localhost:8080/docs
+
+## Repository Structure
+
+```text
+.
+├── backend/       # FastAPI application, data fetchers, and pipeline orchestration
+├── frontend/      # Next.js UI application
+├── pipeline/      # SQL schema and Apache Beam runner logic
+└── tests/         # Unit and integration tests
+```
