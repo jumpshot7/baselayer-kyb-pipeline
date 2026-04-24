@@ -381,7 +381,7 @@ def run_beam_pipelines():
     bucket_name = os.getenv("GCS_BUCKET_NAME")
     options = PipelineOptions([
         "--runner=DirectRunner",
-        "--direct_num_workers=1",
+        "--direct_num_workers=2",
         "--direct_running_mode=multi_threading"
     ])
 
@@ -389,33 +389,33 @@ def run_beam_pipelines():
     nys_headers = get_csv_headers(bucket_name, "raw/nys-corporations.csv")
     
     # NYC Pipeline
-    logger.info("Running Beam pipeline for NYC DCA businesses...")
-    with beam.Pipeline(options=options) as p:
-        (
-            p
-            # Step 1: Read the CSV from GCS, line by line.
-            # Each element in the PCollection is one string
-            | "ReadNycCsv" >> ReadFromText(
-                f"gs://{bucket_name}/raw/nyc-dca-businesses.csv", 
-                skip_header_lines=1
-            )
+    # logger.info("Running Beam pipeline for NYC DCA businesses...")
+    # with beam.Pipeline(options=options) as p:
+    #     (
+    #         p
+    #         # Step 1: Read the CSV from GCS, line by line.
+    #         # Each element in the PCollection is one string
+    #         | "ReadNycCsv" >> ReadFromText(
+    #             f"gs://{bucket_name}/raw/nyc-dca-businesses.csv", 
+    #             skip_header_lines=1
+    #         )
 
-            # Step 2: Parse each CSV string into a dict.
-            # Input: raw string e.g '"1234","JOE PIZZA","Active",..'
-            # Output: dict      e.g{"license_nbr":"1234","business_name": "JOE PIZZA",...}
-            | "ParseNycCsv" >> beam.ParDo(ParseNycCsvLine(nyc_headers))
+    #         # Step 2: Parse each CSV string into a dict.
+    #         # Input: raw string e.g '"1234","JOE PIZZA","Active",..'
+    #         # Output: dict      e.g{"license_nbr":"1234","business_name": "JOE PIZZA",...}
+    #         | "ParseNycCsv" >> beam.ParDo(ParseNycCsvLine(nyc_headers))
 
-            # Step 3: Validate each dict into a Pydantic model.
-            # Input: dict
-            # Output: NycDcaBusiness (or nothing if validation fails)
-            | "ValidateNyc" >> beam.ParDo(ParseAndValidateNyc())
+    #         # Step 3: Validate each dict into a Pydantic model.
+    #         # Input: dict
+    #         # Output: NycDcaBusiness (or nothing if validation fails)
+    #         | "ValidateNyc" >> beam.ParDo(ParseAndValidateNyc())
 
-            # Step 4: Write to Postgres in bulk batches.
-            # Input: NycDcaBusiness models
-            # Output: nothing (side effect: rows in DB)
-            | "WriteNycToDB" >> beam.ParDo(WriteNycToPostgres())   
-        )
-    logger.info("NYC pipeline complete")
+    #         # Step 4: Write to Postgres in bulk batches.
+    #         # Input: NycDcaBusiness models
+    #         # Output: nothing (side effect: rows in DB)
+    #         | "WriteNycToDB" >> beam.ParDo(WriteNycToPostgres())   
+    #     )
+    # logger.info("NYC pipeline complete")
 
     # NYS Pipeline
     logger.info("Running Beam pipeline for NYS corporations...")
