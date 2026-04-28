@@ -2,56 +2,67 @@
 -- KYB Compliance Anomaly Detection Pipeline
 -- Three tables:
 --  1. nyc_dca_businesses   - NYC DCA Licensed businesses
---  2. nys_corp_entities    - NY State registered corportations
+--  2. nys_corp_entities    - NY State registered corporations (NYC boroughs only)
 --  3. kyb_anomalies        - fuzzy match results + anomaly flags
 
 -- Design principles:
--- Indexes on every column used in WHERE, JOIN, or ORDER BY
--- Unique constraints to prevent duplicate ingestion
--- created_at timestap for pipeline auditing
+-- Indexes only on columns that are actually queried, joined, or ordered by.
+-- Unique constraints to prevent duplicate ingestion on pipeline reruns.
+-- created_at timestamp for pipeline auditing.
 
+-- Index strategy:
+-- We deliberately keep indexes minimal. Each index speeds up reads but
+-- slows down INSERT/UPDATE and takes up storage. For a pipeline that
+-- bulk-inserts hundreds of thousands of rows, fewer indexes = faster loads.
+-- Only 7 indexes total, each justified below.
+
+
+-- ============================================================
 -- Table 1: NYC DCA Businesses
--- ============================
--- Store every record from the NYC DVA Legally Operating Businesses dataset. license_number is the natural primary key.
--- Every DCA has a unique number.
+-- ============================================================
 
 CREATE TABLE IF NOT EXISTS nyc_dca_businesses(
     id SERIAL PRIMARY KEY,
 
     -- Core identity
-    license_number TEXT NOT NULL,
-    business_name TEXT NOT NULL,
-    business_unique_id TEXT,
+    license_number      TEXT NOT NULL,
+    business_name       TEXT NOT NULL,
+    business_unique_id  TEXT,
 
     -- License details
-    business_category TEXT,
-    license_type TEXT,
-    license_status TEXT,
+    business_category   TEXT,
+    license_type        TEXT,
+
+    -- Status — used in flag_dormant computation
+    -- e.g. "Active", "Expired", "Surrendered", "Inactive"
+    license_status      TEXT,
 
     -- Dates
-    initial_issuance_date DATE,
-    expiration_date DATE,
+    initial_issuance_date   DATE,
+    expiration_date         DATE,
 
     -- Contact
-    contact_phone         TEXT,
+    contact_phone       TEXT,
 
     -- Address
-    building_number       TEXT,
-    street                TEXT,
-    city                  TEXT,
-    state                 TEXT,
-    zip_code              TEXT,
-    borough               TEXT,
+    building_number     TEXT,
+    street              TEXT,
+    city                TEXT,
+    state               TEXT,
+
+    -- Zip — used in fuzzy match zip grouping
+    zip_code            TEXT,
+    borough             TEXT,
 
     -- Geo
-    latitude              NUMERIC(9, 6),
-    longitude             NUMERIC(9, 6),
+    latitude            NUMERIC(9, 6),
+    longitude           NUMERIC(9, 6),
 
     -- Pipeline metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Unique Constraints: prevent the same license from being inserted twice if the pipeline runs more than once
+-- Prevents duplicate license rows if pipeline reruns
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_nyc_license_number') THEN
@@ -59,55 +70,60 @@ BEGIN
     END IF;
 END $$;
 
--- Indexes for the columns we'll query and join on most often
-CREATE INDEX IF NOT EXISTS idx_nyc_business_name
-    ON nyc_dca_businesses (business_name);
-
-CREATE INDEX IF NOT EXISTS idx_nyc_license_status
-    ON nyc_dca_businesses (license_status);
-
-CREATE INDEX IF NOT EXISTS idx_nyc_expiration_date
-    ON nyc_dca_businesses (expiration_date);
-
-CREATE INDEX IF NOT EXISTS idx_nyc_borough
-    ON nyc_dca_businesses (borough);
-
+-- Index 1: zip_code
+-- Critical — fuzzy matching groups NYC businesses by zip to avoid
+-- comparing every business against every NYS entity (N x M explosion).
 CREATE INDEX IF NOT EXISTS idx_nyc_zip_code
     ON nyc_dca_businesses (zip_code);
 
--- Table 2: NY State Corportations & Entities
--- Stores every record from the NY State DOS corporation registry.
--- dos__ids is the natural primary key - the state assigns a unique ID to every registered entity
+-- Index 2: license_status
+-- Used in flag_dormant: WHERE license_status IN ('Expired', 'Surrendered')
+-- Also used by the API /anomalies endpoint filters.
+CREATE INDEX IF NOT EXISTS idx_nyc_license_status
+    ON nyc_dca_businesses (license_status);
+
+-- Index 3: business_name
+-- Used by the API /businesses/search endpoint (ILIKE query).
+CREATE INDEX IF NOT EXISTS idx_nyc_business_name
+    ON nyc_dca_businesses (business_name);
+
+-- Dropped indexes (not worth the cost):
+--   idx_nyc_expiration_date  — not used in any flag or API query
+--   idx_nyc_borough          — low-traffic filter, not worth slowing inserts
+
+
+-- ============================================================
+-- Table 2: NY State Corporations & Entities
+-- ============================================================
+-- Stripped to only the 4 columns used in the pipeline.
+-- All other NYS fields (entity_type, jurisdiction, dos_process_name,
+-- CEO fields, registered agent fields, location fields) are excluded —
+-- they are not used in any anomaly flag and would waste storage.
 
 CREATE TABLE IF NOT EXISTS nys_corp_entities(
     id SERIAL PRIMARY KEY,
 
-    -- Core identity
-    dos_id TEXT NOT NULL,
-    current_entity_name TEXT NOT NULL,
-    initial_dos_filing_date TEXT,
-    entity_type TEXT,
+    -- Unique state-assigned ID — deduplication key
+    dos_id                  TEXT NOT NULL,
 
-    -- Status — key field for anomaly detection
-    -- e.g. "Active", "Inactive", "Dissolved"
-    dos_process_name      TEXT,
-    county                TEXT,
-    jurisdiction          TEXT,
+    -- Name used for fuzzy matching against NYC DCA business names
+    current_entity_name     TEXT NOT NULL,
 
-    -- Dates
-    date_of_formation     DATE,
+    -- Date the corporation was formed with NYS DOS.
+    -- flag_predates: was the NYC license issued before this date?
+    -- flag_dormant:  has the entity been around > 3 years with a dead license?
+    initial_dos_filing_date DATE,
 
-    -- Address
-    street_address        TEXT,
-    city                  TEXT,
-    state                 TEXT,
-    zip_code              TEXT,
+    -- Zip code of DOS process address.
+    -- Used to group NYS entities by zip so fuzzy matching only
+    -- compares businesses in the same zip code.
+    zip_code                TEXT,
 
     -- Pipeline metadata
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Unique constraint: one row per DOS entity ID
+-- Prevents duplicate entity rows if pipeline reruns
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_nys_dos_id') THEN
@@ -115,52 +131,62 @@ BEGIN
     END IF;
 END $$;
 
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_nys_entity_name
-    ON nys_corp_entities (current_entity_name);
-
-CREATE INDEX IF NOT EXISTS idx_nys_dos_process_name
-    ON nys_corp_entities (dos_process_name);
-
+-- Index 4: zip_code
+-- Critical — fuzzy matching groups NYS entities by zip.
+-- Without this, grouping 400K rows by zip on every run would be slow.
 CREATE INDEX IF NOT EXISTS idx_nys_zip_code
     ON nys_corp_entities (zip_code);
 
--- TABLE 3: KYB Anomalies
--- Most important table, stores the results of the fuzzy matching algorithm and the anomaly flags.
--- Each row represents one potential match between a NYC DCA business and a NY State Corporation, along with a score
--- indicating how confident the match is, and flags for each type of anomaly detected.
+-- Index 5: initial_dos_filing_date
+-- Used in flag_dormant and flag_predates date comparisons.
+CREATE INDEX IF NOT EXISTS idx_nys_filing_date
+    ON nys_corp_entities (initial_dos_filing_date);
+
+-- Dropped indexes (not worth the cost):
+--   idx_nys_entity_name — fuzzy matching uses Python/rapidfuzz in memory,
+--                         not SQL LIKE, so Postgres never searches this column
+
+
+-- ============================================================
+-- Table 3: KYB Anomalies
+-- ============================================================
 
 CREATE TABLE IF NOT EXISTS kyb_anomalies(
     id SERIAL PRIMARY KEY,
 
-    -- Foreign keys linking to the two source tables
-    nyc_business_id INTEGER NOT NULL REFERENCES nyc_dca_businesses(id),
-    nys_entity_id INTEGER NOT NULL REFERENCES nys_corp_entities(id),
+    -- Foreign keys to source tables
+    nyc_business_id     INTEGER NOT NULL REFERENCES nyc_dca_businesses(id),
+    nys_entity_id       INTEGER NOT NULL REFERENCES nys_corp_entities(id),
 
-    -- Fuzzy match confidence score (0.0 - 100.0)
-    -- rapidfuzz returns a score out of 100
-    match_score NUMERIC(5, 2) NOT NULL,
+    -- Fuzzy match confidence (0.0 - 100.0)
+    match_score         NUMERIC(5, 2) NOT NULL,
 
-    -- NYC license is active but NY State entity is dissolved
-    flag_license_active_entity_dissolved BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Flag 1: Active NYC license but NYS entity is dissolved.
+    -- Hardcoded FALSE — the NYS Active Corporations dataset only contains
+    -- active entities. Needs a dissolved corporations dataset to compute.
+    flag_license_active_entity_dissolved    BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- NYC license was issued before the entity was even formed
-    flag_license_predates_formation BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Flag 2: NYC license issued before the NYS entity was formed.
+    -- nyc.initial_issuance_date < nys.initial_dos_filing_date
+    flag_license_predates_formation         BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- NYC license is active but entity hasn't filed in 3+ years
-    flag_entity_dormant BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Flag 3: License is Expired/Surrendered but entity is still active
+    -- in the state registry and was formed more than 3 years ago.
+    -- nyc.license_status IN ('Expired','Surrendered')
+    -- AND years_since(nys.initial_dos_filing_date) > 3
+    flag_entity_dormant                     BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- Adddress on license doesn't match registered address
-    flag_address_mismatch BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Flag 4: NYC license zip != NYS registered address zip.
+    -- nyc.zip_code != nys.zip_code (first 5 digits)
+    flag_address_mismatch                   BOOLEAN NOT NULL DEFAULT FALSE,
 
-    -- Convenience column: true if ANY flag is true. Makes it easy to query all anomalies with one filter
-    has_anomaly BOOLEAN NOT NULL DEFAULT FALSE,
+    -- TRUE if ANY flag above is TRUE
+    has_anomaly         BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Pipeline metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Unique constraint: one match result per NYC+NYS pair
 -- Prevents duplicate anomaly rows if pipeline reruns
 DO $$
 BEGIN
@@ -169,23 +195,20 @@ BEGIN
     END IF;
 END $$;
 
--- Indexes for the API queries in api.py
+-- Index 6: has_anomaly
+-- Every API query filters on this column first.
 CREATE INDEX IF NOT EXISTS idx_anomalies_has_anomaly
     ON kyb_anomalies (has_anomaly);
 
+-- Index 7: match_score
+-- API orders results by match_score DESC.
 CREATE INDEX IF NOT EXISTS idx_anomalies_match_score
     ON kyb_anomalies (match_score DESC);
 
+-- Index 8: nyc_business_id + nys_entity_id
+-- Used in JOINs in every API query that fetches anomaly details.
 CREATE INDEX IF NOT EXISTS idx_anomalies_nyc_id
     ON kyb_anomalies (nyc_business_id);
 
 CREATE INDEX IF NOT EXISTS idx_anomalies_nys_id
     ON kyb_anomalies (nys_entity_id);
-
-CREATE INDEX IF NOT EXISTS idx_anomalies_flag_dissolved
-    ON kyb_anomalies (flag_license_active_entity_dissolved)
-    WHERE flag_license_active_entity_dissolved = TRUE;
-
-CREATE INDEX IF NOT EXISTS idx_anomalies_flag_predates
-    ON kyb_anomalies (flag_license_predates_formation)
-    WHERE flag_license_predates_formation = TRUE;
