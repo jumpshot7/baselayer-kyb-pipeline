@@ -1,26 +1,75 @@
-@import "tailwindcss";
-
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg-base: #080c14;
+  --bg-surface: #0d1420;
+  --bg-elevated: #111927;
+  --bg-hover: #162030;
+
+  --border: #1e2d42;
+  --border-subtle: #152030;
+
+  --text-primary: #e8edf5;
+  --text-secondary: #7a8fa8;
+  --text-muted: #3d5068;
+
+  --accent-gold: #f0a500;
+  --accent-gold-dim: #8a5f00;
+  --accent-blue: #3b82f6;
+  --accent-blue-dim: #1e3a5f;
+
+  --flag-predates: #f0a500;
+  --flag-dormant: #e85d04;
+  --flag-address: #3b82f6;
+  --flag-dissolved: #9b5de5;
+
+  --success: #10b981;
+  --danger: #ef4444;
+
+  /* System font stacks that render correctly everywhere */
+  --font-display: 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  --font-body: 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+
+  --radius: 4px;
+  --radius-lg: 8px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  scroll-behavior: smooth;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+  font-family: var(--font-body);
+}
+
+input {
+  font-family: var(--font-body);
 }

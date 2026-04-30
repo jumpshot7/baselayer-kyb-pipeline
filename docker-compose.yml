@@ -21,7 +21,10 @@ services:
     command: uvicorn api:app --host 0.0.0.0 --port 8080
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        - NEXT_PUBLIC_API_URL=https://laughing-space-sniffle-wjx466vrj56cw5g-8080.app.github.dev
     ports:
       - "3000:3000"
     depends_on:

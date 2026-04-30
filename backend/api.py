@@ -34,7 +34,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://laughing-space-sniffle-wjx466vrj56cw5g-3000.app.github.dev",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -112,7 +115,7 @@ def get_anomaly_summary():
     result = query_one("""
         SELECT
             COUNT(*) AS total_anomalies,
-            COUNT(*) FILTER (WHERE flag_license_active_entity_dissolved) AS flag_license_active_entity_dissolved 
+            COUNT(*) FILTER (WHERE flag_license_active_entity_dissolved) AS flag_license_active_entity_dissolved, 
             COUNT(*) FILTER (WHERE flag_license_predates_formation) AS flag_license_predates_formation,
             COUNT(*) FILTER (WHERE flag_entity_dormant) AS flag_entity_dormant,
             COUNT(*) FILTER (WHERE flag_address_mismatch) AS flag_address_mismatch
