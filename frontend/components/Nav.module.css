@@ -4,8 +4,8 @@
   justify-content: space-between;
   padding: 0 32px;
   height: 56px;
-  background: rgba(8, 12, 20, 0.9);
-  border-bottom: 1px solid var(--border);
+  background: #e8e2d5;
+  border-bottom: 1px solid #c8bfa8;
   position: sticky;
   top: 0;
   z-index: 100;
@@ -18,75 +18,18 @@
   gap: 10px;
 }
 
-.brandMark {
-  color: var(--accent-gold);
-  font-size: 16px;
-}
+.brandMark { color: #4a9968; font-size: 16px; }
+.brandName { font-family: var(--font-display); font-size: 15px; font-weight: 800; letter-spacing: 0.08em; color: #1a2e1f; }
+.brandSub { color: #8a9e8e; font-weight: 400; margin-left: 4px; font-size: 11px; letter-spacing: 0.15em; }
 
-.brandName {
-  font-family: var(--font-display);
-  font-size: 15px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: var(--text-primary);
-}
+.links { display: flex; align-items: center; gap: 4px; }
 
-.brandSub {
-  color: var(--text-muted);
-  font-weight: 400;
-  margin-left: 4px;
-  font-size: 11px;
-  letter-spacing: 0.15em;
-}
+.link { padding: 6px 14px; border-radius: var(--radius); font-size: 12px; font-weight: 500; letter-spacing: 0.06em; color: #4a6e52; transition: all 0.15s ease; text-transform: uppercase; }
+.link:hover { color: #1a2e1f; background: #ddd6c8; }
+.active { color: #4a9968 !important; background: rgba(74, 153, 104, 0.12) !important; }
 
-.links {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.link {
-  padding: 6px 14px;
-  border-radius: var(--radius);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
-  transition: all 0.15s ease;
-  text-transform: uppercase;
-}
-
-.link:hover {
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-}
-
-.active {
-  color: var(--accent-gold) !important;
-  background: rgba(240, 165, 0, 0.08) !important;
-}
-
-.badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  color: var(--success);
-  padding: 4px 10px;
-  border: 1px solid rgba(16, 185, 129, 0.2);
-  border-radius: 2px;
-  background: rgba(16, 185, 129, 0.05);
-}
-
-.dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: pulse 2s infinite;
-}
+.badge { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; color: #4a9968; padding: 4px 10px; border: 1px solid rgba(74, 153, 104, 0.3); border-radius: 2px; background: rgba(74, 153, 104, 0.08); }
+.dot { width: 5px; height: 5px; border-radius: 50%; background: #4a9968; animation: pulse 2s infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

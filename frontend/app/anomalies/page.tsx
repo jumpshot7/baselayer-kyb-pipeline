@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import styles from './anomalies.module.css'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+const API = '/api'
 
 const FLAGS = [
   { key: 'flag_predates', param: 'flag_predates', label: 'Predates Formation', color: 'var(--flag-predates)' },

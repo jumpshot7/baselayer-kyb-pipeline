@@ -177,10 +177,7 @@ def get_anomalies(
             -- NYS entity fields
             e.dos_id,
             e.current_entity_name,
-            e.entity_type,
-            e.dos_process_name,
-            e.date_of_formation,
-            e.date_of_dissolution,
+            e.initial_dos_filing_date AS date_of_formation,
             e.zip_code AS nys_zip
             
         FROM kyb_anomalies a
@@ -251,39 +248,29 @@ def get_predates_anomalies(
     return {"results": results, "count": len(results)}
 
 @app.get("/anomalies/by-borough/{borough}")
-def get_anomalies_by_borough(
-    borough: str,
-    limit:   int = Query(50, ge=1, le=500),
-    offset:  int = Query(0, ge=0),
-):
-    """
-    Anomalies filtered by NYC borough.
-    e.g. /anomalies/by-borough/Brooklyn
-    """
-    results = query("""
-        SELECT
-            n.business_name,
-            n.license_number,
-            n.license_status,
-            n.borough,
-            e.current_entity_name,
-            e.date_of_dissolution,
-            a.match_score,
-            a.has_anomaly,
-            a.flag_license_active_entity_dissolved,
-            a.flag_license_predates_formation,
-            a.flag_entity_dormant,
-            a.flag_address_mismatch
+def get_anomalies_by_borough(borough: str, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+    count_result = query_one("""
+        SELECT COUNT(*) as count
         FROM kyb_anomalies a
         JOIN nyc_dca_businesses n ON n.id = a.nyc_business_id
-        JOIN nys_corp_entities  e ON e.id = a.nys_entity_id
         WHERE a.has_anomaly = TRUE
         AND LOWER(n.borough) = LOWER(%s)
+    """, (borough,))
+    
+    results = query("""
+        SELECT n.business_name, n.license_number, n.license_status, n.borough,
+               e.current_entity_name, a.match_score, a.has_anomaly,
+               a.flag_license_active_entity_dissolved, a.flag_license_predates_formation,
+               a.flag_entity_dormant, a.flag_address_mismatch
+        FROM kyb_anomalies a
+        JOIN nyc_dca_businesses n ON n.id = a.nyc_business_id
+        JOIN nys_corp_entities e ON e.id = a.nys_entity_id
+        WHERE a.has_anomaly = TRUE AND LOWER(n.borough) = LOWER(%s)
         ORDER BY a.match_score DESC
         LIMIT %s OFFSET %s
     """, (borough, limit, offset))
 
-    return {"results": results, "count": len(results), "borough": borough}
+    return {"results": results, "count": count_result["count"], "borough": borough}
 
 @app.get("/anomalies/{anomaly_id}")
 def get_anomaly_by_id(anomaly_id: int):
@@ -322,15 +309,14 @@ def search_businesses(
     """
     results = query("""
         SELECT
-            id, license_number, business_name, dba_trade_name,
+            id, license_number, business_name,
             license_status, license_type, business_category,
             expiration_date, borough, zip_code
         FROM nyc_dca_businesses
         WHERE business_name ILIKE %s
-        OR dba_trade_name ILIKE %s
         ORDER BY business_name
         LIMIT %s OFFSET %s
-    """, (f"%{name}%", f"%{name}%", limit, offset))
+    """, (f"%{name}%", limit, offset))
 
     return {"results": results, "count": len(results), "query": name}
 

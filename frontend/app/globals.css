@@ -1,30 +1,29 @@
 :root {
-  --bg-base: #080c14;
-  --bg-surface: #0d1420;
-  --bg-elevated: #111927;
-  --bg-hover: #162030;
+  --bg-base: #f0ebe0;
+  --bg-surface: #e8e2d5;
+  --bg-elevated: #dfd8c8;
+  --bg-hover: #d5cdb8;
 
-  --border: #1e2d42;
-  --border-subtle: #152030;
+  --border: #c8bfa8;
+  --border-subtle: #ddd6c4;
 
-  --text-primary: #e8edf5;
-  --text-secondary: #7a8fa8;
-  --text-muted: #3d5068;
+  --text-primary: #1a2e1f;
+  --text-secondary: #4a6e52;
+  --text-muted: #8a9e8e;
 
-  --accent-gold: #f0a500;
-  --accent-gold-dim: #8a5f00;
-  --accent-blue: #3b82f6;
-  --accent-blue-dim: #1e3a5f;
+  --accent-gold: #4a9968;
+  --accent-gold-dim: #2d6644;
+  --accent-blue: #3d8a5a;
+  --accent-blue-dim: #c8dfd0;
 
-  --flag-predates: #f0a500;
-  --flag-dormant: #e85d04;
-  --flag-address: #3b82f6;
-  --flag-dissolved: #9b5de5;
+  --flag-predates: #c4962a;
+  --flag-dormant: #c4622a;
+  --flag-address: #3d8a5a;
+  --flag-dissolved: #7a5a9e;
 
-  --success: #10b981;
-  --danger: #ef4444;
+  --success: #4a9968;
+  --danger: #c4422a;
 
-  /* System font stacks that render correctly everywhere */
   --font-display: 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   --font-body: 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;

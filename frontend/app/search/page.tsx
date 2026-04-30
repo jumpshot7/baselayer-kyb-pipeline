@@ -4,7 +4,7 @@ import { useState } from 'react'
 import Link from 'next/link'
 import styles from './search.module.css'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+const API = '/api'
 
 export default function SearchPage() {
   const [query, setQuery] = useState('')
@@ -128,9 +128,6 @@ function BusinessCard({ biz }: { biz: any }) {
       <div className={styles.bizCardTop} onClick={toggle}>
         <div className={styles.bizInfo}>
           <div className={styles.bizName}>{biz.business_name}</div>
-          {biz.dba_trade_name && (
-            <div className={styles.bizDba}>DBA: {biz.dba_trade_name}</div>
-          )}
           <div className={styles.bizMeta}>
             <span className={styles.bizMetaItem}>{biz.license_number}</span>
             <span className={styles.bizMetaDot}>·</span>

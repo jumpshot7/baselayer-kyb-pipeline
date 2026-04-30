@@ -5,7 +5,7 @@ import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import styles from './detail.module.css'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+const API = '/api'
 
 function FlagRow({ active, color, bg, label, description }: any) {
   return (

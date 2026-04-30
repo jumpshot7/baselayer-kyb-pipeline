@@ -360,3 +360,19 @@
   color: var(--accent-gold-dim);
   font-size: 18px;
 }
+
+.barFill {
+  height: 100%;
+  background: var(--accent-gold);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 1.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.scoreFill {
+  width: 100%;
+  background: linear-gradient(to top, var(--accent-gold), rgba(240, 235, 224, 0.4));
+  border-radius: var(--radius) var(--radius) 0 0;
+  height: 0%;
+  transition: height 1.2s cubic-bezier(0.4, 0, 0.2, 1);
+}

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import styles from './page.module.css'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+const API = '/api'
 
 const BOROUGHS = ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island']
 
@@ -14,8 +14,8 @@ const FLAG_CONFIG = [
     label: 'License Predates Formation',
     description: 'License issued before entity existed',
     color: 'var(--flag-predates)',
-    bg: 'rgba(240, 165, 0, 0.06)',
-    border: 'rgba(240, 165, 0, 0.2)',
+    bg: 'rgba(196, 150, 42, 0.08)',
+    border: 'rgba(196, 150, 42, 0.25)',
     icon: '⟲',
   },
   {
@@ -23,8 +23,8 @@ const FLAG_CONFIG = [
     label: 'Entity Dormant',
     description: 'Dead license, active legal shell',
     color: 'var(--flag-dormant)',
-    bg: 'rgba(232, 93, 4, 0.06)',
-    border: 'rgba(232, 93, 4, 0.2)',
+    bg: 'rgba(196, 98, 42, 0.08)',
+    border: 'rgba(196, 98, 42, 0.25)',
     icon: '◎',
   },
   {
@@ -32,26 +32,46 @@ const FLAG_CONFIG = [
     label: 'Address Mismatch',
     description: 'Operating from unregistered location',
     color: 'var(--flag-address)',
-    bg: 'rgba(59, 130, 246, 0.06)',
-    border: 'rgba(59, 130, 246, 0.2)',
+    bg: 'rgba(61, 138, 90, 0.08)',
+    border: 'rgba(61, 138, 90, 0.25)',
     icon: '⊘',
   },
 ]
+
+function useCountUp(target: number, duration = 1500, start = false) {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    if (!start || target === 0) return
+    let startTime: number
+    let rafId: number
+    const animate = (timestamp: number) => {
+      if (!startTime) startTime = timestamp
+      const progress = Math.min((timestamp - startTime) / duration, 1)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      setCount(Math.floor(eased * target))
+      if (progress < 1) rafId = requestAnimationFrame(animate)
+      else setCount(target)
+    }
+    rafId = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(rafId)
+  }, [target, start, duration])
+  return count
+}
 
 export default function DashboardPage() {
   const [summary, setSummary] = useState<any>(null)
   const [boroughData, setBoroughData] = useState<any[]>([])
   const [scoreData, setScoreData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [animate, setAnimate] = useState(false)
+  const [showBars, setShowBars] = useState(false)
 
   useEffect(() => {
     async function load() {
       try {
-        // Summary
         const s = await fetch(`${API}/anomalies/summary`).then(r => r.json())
         setSummary(s)
 
-        // Borough data
         const boroughResults = await Promise.all(
           BOROUGHS.map(async b => {
             const r = await fetch(`${API}/anomalies/by-borough/${b}?limit=1`).then(r => r.json())
@@ -60,12 +80,20 @@ export default function DashboardPage() {
         )
         setBoroughData(boroughResults)
 
-        // Score distribution — fetch anomalies and bucket scores
-        const anomalies = await fetch(`${API}/anomalies?limit=500`).then(r => r.json())
+        const [chunk1, chunk2, chunk3] = await Promise.all([
+          fetch(`${API}/anomalies?limit=500&offset=0`).then(r => r.json()),
+          fetch(`${API}/anomalies?limit=500&offset=5000`).then(r => r.json()),
+          fetch(`${API}/anomalies?limit=500&offset=10000`).then(r => r.json()),
+        ])
+        const allAnomalies = [
+          ...(chunk1.results || []),
+          ...(chunk2.results || []),
+          ...(chunk3.results || []),
+        ]
         const buckets: Record<string, number> = {
           '85-89': 0, '90-94': 0, '95-99': 0, '100': 0
         }
-        ;(anomalies.results || []).forEach((a: any) => {
+        allAnomalies.forEach((a: any) => {
           const s = parseFloat(a.match_score)
           if (s === 100) buckets['100']++
           else if (s >= 95) buckets['95-99']++
@@ -77,10 +105,23 @@ export default function DashboardPage() {
         console.error(e)
       } finally {
         setLoading(false)
+        setTimeout(() => setAnimate(true), 100)
+        setTimeout(() => setShowBars(true), 300)
       }
     }
     load()
   }, [])
+
+  const totalCount = useCountUp(summary?.total_anomalies || 0, 2000, animate)
+  const predatesCount = useCountUp(summary?.flag_license_predates_formation || 0, 1800, animate)
+  const dormantCount = useCountUp(summary?.flag_entity_dormant || 0, 1800, animate)
+  const addressCount = useCountUp(summary?.flag_address_mismatch || 0, 1800, animate)
+
+  const countMap: Record<string, number> = {
+    flag_license_predates_formation: predatesCount,
+    flag_entity_dormant: dormantCount,
+    flag_address_mismatch: addressCount,
+  }
 
   const maxBorough = Math.max(...boroughData.map(b => b.count), 1)
   const maxScore = Math.max(...scoreData.map(s => s.count), 1)
@@ -100,7 +141,7 @@ export default function DashboardPage() {
         <div className={styles.heroLeft}>
           <p className={styles.heroEyebrow}>KYB COMPLIANCE ENGINE</p>
           <h1 className={styles.heroTitle}>
-            <span className={styles.heroNumber}>{summary?.total_anomalies?.toLocaleString() || 0}</span>
+            <span className={styles.heroNumber}>{totalCount.toLocaleString()}</span>
             <span className={styles.heroLabel}>Anomalies<br />Detected</span>
           </h1>
           <p className={styles.heroSub}>
@@ -142,16 +183,13 @@ export default function DashboardPage() {
             <div
               key={flag.key}
               className={styles.flagCard}
-              style={{
-                background: flag.bg,
-                borderColor: flag.border,
-              }}
+              style={{ background: flag.bg, borderColor: flag.border }}
             >
               <div className={styles.flagIcon} style={{ color: flag.color }}>
                 {flag.icon}
               </div>
               <div className={styles.flagCount} style={{ color: flag.color }}>
-                {(summary?.[flag.key] || 0).toLocaleString()}
+                {(countMap[flag.key] || 0).toLocaleString()}
               </div>
               <div className={styles.flagLabel}>{flag.label}</div>
               <div className={styles.flagDesc}>{flag.description}</div>
@@ -173,7 +211,7 @@ export default function DashboardPage() {
                 <div className={styles.barTrack}>
                   <div
                     className={styles.barFill}
-                    style={{ width: `${(b.count / maxBorough) * 100}%` }}
+                    style={{ width: showBars ? `${(b.count / maxBorough) * 100}%` : '0%' }}
                   />
                 </div>
                 <span className={styles.barValue}>{b.count.toLocaleString()}</span>
@@ -192,7 +230,7 @@ export default function DashboardPage() {
                 <div className={styles.scoreTrack}>
                   <div
                     className={styles.scoreFill}
-                    style={{ height: `${(s.count / maxScore) * 100}%` }}
+                    style={{ height: showBars ? `${(s.count / maxScore) * 100}%` : '0%' }}
                   />
                 </div>
                 <span className={styles.scoreLabel}>{s.range}</span>
