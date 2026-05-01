@@ -1,3 +1,4 @@
+<img width="1904" height="913" alt="Screenshot 2026-04-30 205413" src="https://github.com/user-attachments/assets/80243754-afc2-4a38-af39-52c6c8be604b" />
 # KYB Compliance Pipeline
 
 This project is a Know Your Business (KYB) compliance pipeline. It cross-references NYC business licenses (fetched from Socrata) against New York State (NYS) corporate entities to detect compliance anomalies, such as dissolved entities still holding active licenses, address mismatches, or entities formed after their license was issued.
