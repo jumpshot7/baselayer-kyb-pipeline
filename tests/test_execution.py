@@ -3,10 +3,18 @@ test_execution.py
 
 Tests for execution.py covering:
 - DB population checks
-- Anomaly flag computation
-- Anomaly writing to Postgres
+- Table creation
+- Anomaly flag computation (matches actual logic in execution.py)
+- Writing anomalies to Postgres
 
-unnittest.mock is used to avoid hitting real GCS/Postgres/Beam during tests
+Key differences from original:
+- flag_license_active_entity_dissolved is ALWAYS False (hardcoded)
+  because the NYS dataset only contains active entities
+- flag_entity_dormant uses nyc.license_status IN DEAD_LICENSE_STATUSES
+  AND years_since(nys.initial_dos_filing_date) > 3
+- flag_predates uses nyc.initial_issuance_date < nys.initial_dos_filing_date
+- flag_address uses nyc.zip_code[:5] != nys.zip_code[:5]
+- NysCorpEntity uses initial_dos_filing_date (not date_of_formation)
 """
 
 import pytest
@@ -17,31 +25,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
-from execution import(
+from execution import (
     tables_are_populated,
     create_tables,
     write_anomalies,
     compute_anomaly_flags,
-    years_since
+    years_since,
+    DEAD_LICENSE_STATUSES,
+    DORMANT_YEARS_THRESHOLD,
+    MATCH_THRESHOLD,
 )
 
-# Helper - Fake DB Connection
-# Rather than connecting to a real Postgres database,
-# create a fake connection using MagicMock.
-# MagicMock automatically creates fake versions of any method you call on it, such as .cursor(), .commit()
+
+# -------------------------------------------------------
+# Helper: Fake DB Connection
+# -------------------------------------------------------
+
 def make_mock_conn(fetchone_return=None, fetchall_return=None):
     """
     Build a fake psycopg2 connection that returns whatever we tell it to.
-
-    fetchone_return: what cur.fetchone() returns
-    fetchall_return: what cur.fetchall() returns
     """
     mock_cur = MagicMock()
     mock_cur.fetchone.return_value = fetchone_return
     mock_cur.fetchall.return_value = fetchall_return or []
-
-    # The cursor is used as a context manager: 'with conn.cursor() s cur'
-    # So we need __enter__ to return our fake cursor
     mock_cur.__enter__ = lambda s: mock_cur
     mock_cur.__exit__ = MagicMock(return_value=False)
 
@@ -50,18 +56,39 @@ def make_mock_conn(fetchone_return=None, fetchall_return=None):
 
     return mock_conn, mock_cur
 
+
+def make_nyc(**kwargs):
+    """Create a fake NYC business object with given attributes."""
+    defaults = {
+        "license_status":        "Active",
+        "initial_issuance_date": date(2020, 1, 1),
+        "zip_code":              "10001",
+    }
+    defaults.update(kwargs)
+    return type("NYC", (), defaults)()
+
+
+def make_nys(**kwargs):
+    """Create a fake NYS entity object with given attributes."""
+    defaults = {
+        "initial_dos_filing_date": date(2015, 1, 1),
+        "zip_code":                "10001",
+    }
+    defaults.update(kwargs)
+    return type("NYS", (), defaults)()
+
+
+# -------------------------------------------------------
+# SECTION 1: tables_are_populated()
+# -------------------------------------------------------
+
 def test_tables_are_populated_returns_false_when_empty():
     """
     When both tables have 0 rows, tables_are_populated()
     should return False so the pipeline runs.
     """
-    # fetchone returns (0,) — simulating COUNT(*) = 0
     mock_conn, _ = make_mock_conn(fetchone_return=(0,))
 
-    # patch("execution.get_conn") replaces the real get_conn()
-    # in execution.py with one that returns our fake connection.
-    # This is the core mocking pattern — we intercept the call
-    # before it reaches real Postgres.
     with patch("execution.get_conn", return_value=mock_conn):
         result = tables_are_populated()
 
@@ -73,7 +100,6 @@ def test_tables_are_populated_returns_true_when_populated():
     When both tables have rows, tables_are_populated()
     should return True so the pipeline is skipped.
     """
-    # fetchone returns (100,) — simulating COUNT(*) = 100
     mock_conn, _ = make_mock_conn(fetchone_return=(100,))
 
     with patch("execution.get_conn", return_value=mock_conn):
@@ -82,130 +108,90 @@ def test_tables_are_populated_returns_true_when_populated():
     assert result is True
 
 
+def test_tables_are_populated_false_when_only_nyc_populated():
+    """
+    If only one table has rows, pipeline should still run.
+    Both tables need rows to skip the pipeline.
+    """
+    mock_conn, mock_cur = make_mock_conn()
+    # First COUNT returns 100 (NYC populated), second returns 0 (NYS empty)
+    mock_cur.fetchone.side_effect = [(100,), (0,)]
 
-# create_tables() Tests
+    with patch("execution.get_conn", return_value=mock_conn):
+        result = tables_are_populated()
+
+    assert result is False
+
+
+# -------------------------------------------------------
+# SECTION 2: create_tables()
+# -------------------------------------------------------
 
 def test_create_tables_reads_sql_and_executes():
     """
-    create_tables() should:
-    1. Open database.sql
-    2. Read its contents
-    3. Execute the SQL against Postgres
-    4. Commit the transaction
+    create_tables() should open database.sql, read its contents,
+    execute the SQL, and commit the transaction.
     """
-    fake_sql      = "CREATE TABLE IF NOT EXISTS test (id SERIAL);"
+    fake_sql = "CREATE TABLE IF NOT EXISTS test (id SERIAL);"
     mock_conn, mock_cur = make_mock_conn()
 
-    # mock_open is a special mock for file operations.
-    # It simulates open() returning our fake_sql string
-    # without touching the real filesystem.
     with patch("builtins.open", mock_open(read_data=fake_sql)):
         with patch("execution.get_conn", return_value=mock_conn):
             create_tables()
 
-    # Verify the SQL was actually executed
     mock_cur.execute.assert_called_once_with(fake_sql)
-
-    # Verify commit was called — without commit nothing is saved
     mock_conn.commit.assert_called_once()
 
 
+# -------------------------------------------------------
+# SECTION 3: years_since()
+# -------------------------------------------------------
 
-# years_since() Tests
-
-
-def test_years_since_recent_date():
-    """
-    A date from 1 year ago should return approximately 1.0.
-    We use a range check because the exact value depends
-    on when the test runs.
-    """
-    from datetime import timedelta
+def test_years_since_one_year_ago():
+    """A date 1 year ago should return approximately 1.0."""
     one_year_ago = date.today().replace(year=date.today().year - 1)
-    result       = years_since(one_year_ago)
-
-    # Should be between 0.9 and 1.1 years
+    result = years_since(one_year_ago)
     assert 0.9 <= result <= 1.1
 
 
-def test_years_since_old_date():
-    """
-    A date from 10 years ago should return approximately 10.0.
-    """
+def test_years_since_ten_years_ago():
+    """A date 10 years ago should return approximately 10.0."""
     ten_years_ago = date.today().replace(year=date.today().year - 10)
-    result        = years_since(ten_years_ago)
-
+    result = years_since(ten_years_ago)
     assert 9.9 <= result <= 10.1
 
 
-
-# compute_anomaly_flags() Tests
-#
-# We use type() to create lightweight fake objects that
-# behave like our Pydantic models but don't need the
-# full model machinery. This is the same pattern used
-# in execution.py's fuzzy matching section.
-
-def make_nyc(**kwargs):
-    """Create a fake NYC business object with given attributes."""
-    defaults = {
-        "license_status":        "Active",
-        "initial_issuance_date": date(2020, 1, 1),
-        "expiration_date":       date(2025, 1, 1),
-        "zip_code":              "10001",
-    }
-    defaults.update(kwargs)
-    return type("NYC", (), defaults)()
+def test_years_since_today():
+    """Today should return approximately 0."""
+    result = years_since(date.today())
+    assert 0.0 <= result < 0.01
 
 
-def make_nys(**kwargs):
-    """Create a fake NYS entity object with given attributes."""
-    defaults = {
-        "date_of_formation":   date(2015, 1, 1),
-        "date_of_dissolution": None,
-        "zip_code":            "10001",
-    }
-    defaults.update(kwargs)
-    return type("NYS", (), defaults)()
+# -------------------------------------------------------
+# SECTION 4: compute_anomaly_flags()
+# -------------------------------------------------------
 
-
-def test_flag_dissolved_when_active_license_and_dissolved_entity():
+def test_flag_dissolved_always_false():
     """
-    flag_license_active_entity_dissolved should be True
-    when the NYC license is Active but the NYS entity
-    has a dissolution date.
+    flag_license_active_entity_dissolved is ALWAYS False.
+    The NYS Active Corporations dataset only contains active
+    entities — a dissolved dataset would be needed to compute this.
     """
     nyc = make_nyc(license_status="Active")
-    nys = make_nys(date_of_dissolution=date(2021, 6, 1))
-
-    flags = compute_anomaly_flags(nyc, nys)
-
-    assert flags["flag_license_active_entity_dissolved"] is True
-    assert flags["has_anomaly"] is True
-
-
-def test_flag_dissolved_false_when_entity_active():
-    """
-    flag_license_active_entity_dissolved should be False
-    when the NYS entity has no dissolution date.
-    """
-    nyc = make_nyc(license_status="Active")
-    nys = make_nys(date_of_dissolution=None)
+    nys = make_nys()
 
     flags = compute_anomaly_flags(nyc, nys)
 
     assert flags["flag_license_active_entity_dissolved"] is False
 
 
-def test_flag_predates_formation():
+def test_flag_predates_formation_true():
     """
-    flag_license_predates_formation should be True when
-    the NYC license was issued before the NYS entity formed.
-    Joe's Pizza got a license in 2010 but the LLC wasn't
-    registered until 2015 — that's a red flag.
+    flag_license_predates_formation should be True when the NYC
+    license was issued before the NYS entity was formed.
     """
     nyc = make_nyc(initial_issuance_date=date(2010, 1, 1))
-    nys = make_nys(date_of_formation=date(2015, 1, 1))
+    nys = make_nys(initial_dos_filing_date=date(2015, 1, 1))
 
     flags = compute_anomaly_flags(nyc, nys)
 
@@ -213,23 +199,111 @@ def test_flag_predates_formation():
     assert flags["has_anomaly"] is True
 
 
-def test_flag_predates_formation_false_when_normal():
+def test_flag_predates_formation_false_when_entity_formed_first():
     """
-    flag_license_predates_formation should be False when
-    the entity was formed before the license was issued.
+    flag_license_predates_formation should be False when the
+    entity was formed before the license was issued.
     """
     nyc = make_nyc(initial_issuance_date=date(2018, 1, 1))
-    nys = make_nys(date_of_formation=date(2015, 1, 1))
+    nys = make_nys(initial_dos_filing_date=date(2015, 1, 1))
 
     flags = compute_anomaly_flags(nyc, nys)
 
     assert flags["flag_license_predates_formation"] is False
 
 
-def test_flag_address_mismatch():
+def test_flag_predates_formation_false_when_same_date():
     """
-    flag_address_mismatch should be True when the zip codes
-    on the license and the registered entity don't match.
+    flag_license_predates_formation should be False when the
+    license and formation dates are the same.
+    """
+    nyc = make_nyc(initial_issuance_date=date(2015, 1, 1))
+    nys = make_nys(initial_dos_filing_date=date(2015, 1, 1))
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_license_predates_formation"] is False
+
+
+def test_flag_predates_formation_false_when_dates_missing():
+    """
+    flag_license_predates_formation should be False when either
+    date is None — can't compare missing data.
+    """
+    nyc = make_nyc(initial_issuance_date=None)
+    nys = make_nys(initial_dos_filing_date=date(2015, 1, 1))
+
+    flags = compute_anomaly_flags(nyc, nys)
+    assert flags["flag_license_predates_formation"] is False
+
+    nyc2 = make_nyc(initial_issuance_date=date(2010, 1, 1))
+    nys2 = make_nys(initial_dos_filing_date=None)
+
+    flags2 = compute_anomaly_flags(nyc2, nys2)
+    assert flags2["flag_license_predates_formation"] is False
+
+
+def test_flag_entity_dormant_true_expired_license():
+    """
+    flag_entity_dormant should be True when the NYC license is
+    Expired AND the NYS entity has been active for more than
+    DORMANT_YEARS_THRESHOLD years.
+    """
+    old_date = date.today().replace(year=date.today().year - (DORMANT_YEARS_THRESHOLD + 1))
+    nyc = make_nyc(license_status="Expired")
+    nys = make_nys(initial_dos_filing_date=old_date)
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_entity_dormant"] is True
+    assert flags["has_anomaly"] is True
+
+
+def test_flag_entity_dormant_true_surrendered_license():
+    """
+    flag_entity_dormant should be True for Surrendered licenses too.
+    """
+    old_date = date.today().replace(year=date.today().year - (DORMANT_YEARS_THRESHOLD + 1))
+    nyc = make_nyc(license_status="Surrendered")
+    nys = make_nys(initial_dos_filing_date=old_date)
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_entity_dormant"] is True
+
+
+def test_flag_entity_dormant_false_active_license():
+    """
+    flag_entity_dormant should be False when the license is Active
+    even if the entity is old.
+    """
+    old_date = date.today().replace(year=date.today().year - 10)
+    nyc = make_nyc(license_status="Active")
+    nys = make_nys(initial_dos_filing_date=old_date)
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_entity_dormant"] is False
+
+
+def test_flag_entity_dormant_false_entity_too_young():
+    """
+    flag_entity_dormant should be False when the entity is younger
+    than DORMANT_YEARS_THRESHOLD years, even with a dead license.
+    """
+    recent_date = date.today().replace(year=date.today().year - 1)
+    nyc = make_nyc(license_status="Expired")
+    nys = make_nys(initial_dos_filing_date=recent_date)
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_entity_dormant"] is False
+
+
+def test_flag_address_mismatch_true():
+    """
+    flag_address_mismatch should be True when the first 5 digits
+    of the zip codes don't match.
     """
     nyc = make_nyc(zip_code="10001")
     nys = make_nys(zip_code="11201")
@@ -237,9 +311,10 @@ def test_flag_address_mismatch():
     flags = compute_anomaly_flags(nyc, nys)
 
     assert flags["flag_address_mismatch"] is True
+    assert flags["has_anomaly"] is True
 
 
-def test_flag_address_match():
+def test_flag_address_mismatch_false_when_zips_match():
     """
     flag_address_mismatch should be False when zip codes match.
     """
@@ -251,10 +326,39 @@ def test_flag_address_match():
     assert flags["flag_address_mismatch"] is False
 
 
+def test_flag_address_mismatch_handles_zip_plus_four():
+    """
+    flag_address_mismatch should only compare the first 5 digits,
+    so ZIP+4 format (10001-1234) should match plain 10001.
+    """
+    nyc = make_nyc(zip_code="10001-1234")
+    nys = make_nys(zip_code="10001")
+
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_address_mismatch"] is False
+
+
+def test_flag_address_mismatch_false_when_zip_missing():
+    """
+    flag_address_mismatch should be False when either zip is None.
+    """
+    nyc = make_nyc(zip_code=None)
+    nys = make_nys(zip_code="10001")
+
+    flags = compute_anomaly_flags(nyc, nys)
+    assert flags["flag_address_mismatch"] is False
+
+    nyc2 = make_nyc(zip_code="10001")
+    nys2 = make_nys(zip_code=None)
+
+    flags2 = compute_anomaly_flags(nyc2, nys2)
+    assert flags2["flag_address_mismatch"] is False
+
+
 def test_no_anomaly_when_everything_clean():
     """
     has_anomaly should be False when all flags are False.
-    A perfectly clean business with matching records.
     """
     nyc = make_nyc(
         license_status="Active",
@@ -262,92 +366,184 @@ def test_no_anomaly_when_everything_clean():
         zip_code="10001",
     )
     nys = make_nys(
-        date_of_formation=date(2015, 1, 1),
-        date_of_dissolution=None,
+        initial_dos_filing_date=date(2015, 1, 1),
         zip_code="10001",
     )
 
     flags = compute_anomaly_flags(nyc, nys)
 
+    assert flags["flag_license_active_entity_dissolved"] is False
+    assert flags["flag_license_predates_formation"] is False
+    assert flags["flag_entity_dormant"] is False
+    assert flags["flag_address_mismatch"] is False
     assert flags["has_anomaly"] is False
 
 
+def test_multiple_flags_can_fire_simultaneously():
+    """
+    Multiple flags can be True at the same time for the same pair.
+    """
+    old_date = date.today().replace(year=date.today().year - (DORMANT_YEARS_THRESHOLD + 1))
+    nyc = make_nyc(
+        license_status="Expired",
+        initial_issuance_date=date(2010, 1, 1),
+        zip_code="10001",
+    )
+    nys = make_nys(
+        initial_dos_filing_date=old_date,
+        zip_code="11201",
+    )
 
-#  write_anomalies() Tests
+    flags = compute_anomaly_flags(nyc, nys)
+
+    assert flags["flag_entity_dormant"] is True
+    assert flags["flag_address_mismatch"] is True
+    assert flags["has_anomaly"] is True
+
+
+# -------------------------------------------------------
+# SECTION 5: Constants
+# -------------------------------------------------------
+
+def test_dead_license_statuses_contains_expected_values():
+    """DEAD_LICENSE_STATUSES should include Expired and Surrendered."""
+    assert "Expired" in DEAD_LICENSE_STATUSES
+    assert "Surrendered" in DEAD_LICENSE_STATUSES
+    assert "Active" not in DEAD_LICENSE_STATUSES
+
+
+def test_match_threshold_is_reasonable():
+    """MATCH_THRESHOLD should be between 80 and 100."""
+    assert 80.0 <= MATCH_THRESHOLD <= 100.0
+
+
+def test_dormant_years_threshold_is_positive():
+    """DORMANT_YEARS_THRESHOLD should be a positive number."""
+    assert DORMANT_YEARS_THRESHOLD > 0
+
+
+# -------------------------------------------------------
+# SECTION 6: write_anomalies()
+# -------------------------------------------------------
 
 def test_write_anomalies_skips_when_empty():
     """
     write_anomalies([]) should return early without
-    touching the database at all.
+    touching the database.
     """
     with patch("execution.get_conn") as mock_get_conn:
         write_anomalies([])
 
-    # get_conn should never have been called
     mock_get_conn.assert_not_called()
 
 
-def test_write_anomalies_inserts_records():
+def test_write_anomalies_skips_clean_pairs():
     """
-    write_anomalies() should insert one row per anomaly
-    and commit the transaction.
-    """
-    mock_conn, mock_cur = make_mock_conn()
-
-    anomalies = [{
-        "nyc_business_id":                    1,
-        "nys_entity_id":                      2,
-        "match_score":                        92.5,
-        "flag_license_active_entity_dissolved": True,
-        "flag_license_predates_formation":    False,
-        "flag_entity_dormant":                False,
-        "flag_address_mismatch":              False,
-        "has_anomaly":                        True,
-    }]
-
-    with patch("execution.get_conn", return_value=mock_conn):
-        write_anomalies(anomalies)
-
-    # Verify one INSERT was executed
-    assert mock_cur.execute.call_count == 1
-
-    # Verify commit was called
-    mock_conn.commit.assert_called_once()
-
-
-def test_write_anomalies_inserts_multiple_records():
-    """
-    write_anomalies() should insert ALL anomalies,
-    not just the first one.
+    write_anomalies() should skip pairs where has_anomaly is False.
+    Only anomalous pairs get written to the DB.
     """
     mock_conn, mock_cur = make_mock_conn()
 
     anomalies = [
         {
-            "nyc_business_id":                    1,
-            "nys_entity_id":                      2,
-            "match_score":                        92.5,
-            "flag_license_active_entity_dissolved": True,
-            "flag_license_predates_formation":    False,
-            "flag_entity_dormant":                False,
-            "flag_address_mismatch":              False,
-            "has_anomaly":                        True,
+            "nyc_business_id": 1,
+            "nys_entity_id": 2,
+            "match_score": 92.5,
+            "flag_license_active_entity_dissolved": False,
+            "flag_license_predates_formation": False,
+            "flag_entity_dormant": False,
+            "flag_address_mismatch": False,
+            "has_anomaly": False,  # clean pair — should be skipped
+        }
+    ]
+
+    with patch("execution.get_conn", return_value=mock_conn):
+        write_anomalies(anomalies)
+
+    mock_get_conn = patch("execution.get_conn", return_value=mock_conn)
+    assert mock_cur.execute.call_count == 0
+
+
+def test_write_anomalies_inserts_anomalous_records():
+    """
+    write_anomalies() should insert rows where has_anomaly is True
+    and commit the transaction.
+    """
+    mock_conn, mock_cur = make_mock_conn()
+
+    anomalies = [{
+        "nyc_business_id": 1,
+        "nys_entity_id": 2,
+        "match_score": 92.5,
+        "flag_license_active_entity_dissolved": False,
+        "flag_license_predates_formation": True,
+        "flag_entity_dormant": False,
+        "flag_address_mismatch": False,
+        "has_anomaly": True,
+    }]
+
+    with patch("execution.get_conn", return_value=mock_conn):
+        write_anomalies(anomalies)
+
+    assert mock_cur.execute.call_count == 1
+    mock_conn.commit.assert_called_once()
+
+
+def test_write_anomalies_inserts_multiple_records():
+    """
+    write_anomalies() should insert ALL anomalous records.
+    """
+    mock_conn, mock_cur = make_mock_conn()
+
+    anomalies = [
+        {
+            "nyc_business_id": 1, "nys_entity_id": 2, "match_score": 92.5,
+            "flag_license_active_entity_dissolved": False,
+            "flag_license_predates_formation": True,
+            "flag_entity_dormant": False, "flag_address_mismatch": False,
+            "has_anomaly": True,
         },
         {
-            "nyc_business_id":                    3,
-            "nys_entity_id":                      4,
-            "match_score":                        88.0,
+            "nyc_business_id": 3, "nys_entity_id": 4, "match_score": 88.0,
             "flag_license_active_entity_dissolved": False,
-            "flag_license_predates_formation":    True,
-            "flag_entity_dormant":                False,
-            "flag_address_mismatch":              False,
-            "has_anomaly":                        True,
+            "flag_license_predates_formation": False,
+            "flag_entity_dormant": True, "flag_address_mismatch": True,
+            "has_anomaly": True,
         },
     ]
 
     with patch("execution.get_conn", return_value=mock_conn):
         write_anomalies(anomalies)
 
-    # Two anomalies = two INSERT statements
     assert mock_cur.execute.call_count == 2
     mock_conn.commit.assert_called_once()
+
+
+def test_write_anomalies_mixed_filters_clean_pairs():
+    """
+    write_anomalies() with a mix of clean and anomalous pairs
+    should only insert the anomalous ones.
+    """
+    mock_conn, mock_cur = make_mock_conn()
+
+    anomalies = [
+        {
+            "nyc_business_id": 1, "nys_entity_id": 2, "match_score": 100.0,
+            "flag_license_active_entity_dissolved": False,
+            "flag_license_predates_formation": False,
+            "flag_entity_dormant": False, "flag_address_mismatch": False,
+            "has_anomaly": False,  # clean — skip
+        },
+        {
+            "nyc_business_id": 3, "nys_entity_id": 4, "match_score": 88.0,
+            "flag_license_active_entity_dissolved": False,
+            "flag_license_predates_formation": True,
+            "flag_entity_dormant": False, "flag_address_mismatch": False,
+            "has_anomaly": True,  # anomalous — insert
+        },
+    ]
+
+    with patch("execution.get_conn", return_value=mock_conn):
+        write_anomalies(anomalies)
+
+    assert mock_cur.execute.call_count == 1

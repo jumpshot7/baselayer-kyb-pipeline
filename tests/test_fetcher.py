@@ -1,157 +1,302 @@
 """
 test_fetcher.py
 
-Tests for fetcher.py. We mock external HTTP requests (httpx)
+Tests for fetcher.py. We mock external HTTP requests (requests)
 and Google Cloud Storage (google.cloud.storage) to keep tests
 fast and isolated.
+
+The actual fetcher.py has these main functions:
+- make_session()            -> returns a requests.Session with retry logic
+- stream_bulk_to_gcs()      -> downloads full NYC CSV via bulk export, uploads to GCS
+- fetch_page_with_retry()   -> fetches a single paginated page with retry logic
+- fetch_nys_paginated_to_gcs() -> paginates NYS API with filters, uploads to GCS
+- run()                     -> orchestrates both fetches
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, call
 import sys
 from pathlib import Path
 
-# Add backend to path so we can import fetcher
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
-from fetcher import fetch_all_records, records_to_csv_bytes, upload_to_gcs, run
+from fetcher import (
+    make_session,
+    fetch_page_with_retry,
+    run,
+    NYC_COUNTIES,
+    NYS_COLUMNS,
+    PAGE_SIZE,
+)
+
 
 # -------------------------------------------------------
-# SECTION 1: Test CSV Conversion
+# SECTION 1: make_session()
 # -------------------------------------------------------
-def test_records_to_csv_bytes_empty():
-    """Test that passing an empty list returns empty bytes."""
-    result = records_to_csv_bytes([])
-    assert result == b""
 
-def test_records_to_csv_bytes_success():
-    """Test that valid records are converted to CSV bytes with headers."""
-    records = [
-        {"id": "1", "name": "Joe's Pizza"},
-        {"id": "2", "name": "Mario's Deli"}
+def test_make_session_returns_session():
+    """
+    make_session() should return a requests.Session object
+    with retry adapters mounted on http:// and https://.
+    """
+    session = make_session()
+    import requests
+    assert isinstance(session, requests.Session)
+    # Verify adapters are mounted
+    assert "https://" in session.adapters
+    assert "http://" in session.adapters
+
+
+# -------------------------------------------------------
+# SECTION 2: fetch_page_with_retry()
+# -------------------------------------------------------
+
+def test_fetch_page_with_retry_success():
+    """
+    fetch_page_with_retry() should return the response
+    on a successful first attempt.
+    """
+    mock_session = MagicMock()
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_session.get.return_value = mock_response
+
+    result = fetch_page_with_retry(
+        session=mock_session,
+        base_url="https://test.domain/resource/test.csv",
+        params={"$limit": 50000, "$offset": 0},
+        headers={},
+        page=0,
+    )
+
+    assert result == mock_response
+    mock_session.get.assert_called_once()
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_fetch_page_with_retry_retries_on_timeout():
+    """
+    fetch_page_with_retry() should retry on Timeout
+    and eventually return the response if a later attempt succeeds.
+    """
+    import requests
+
+    mock_session = MagicMock()
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+
+    # First call raises Timeout, second call succeeds
+    mock_session.get.side_effect = [
+        requests.exceptions.Timeout(),
+        mock_response,
     ]
-    result = records_to_csv_bytes(records)
-    
-    # Decode bytes to string so we can easily check the content
-    csv_string = result.decode("utf-8")
-    
-    # It should have a header row and data rows
-    assert "id,name" in csv_string
-    assert "1,Joe's Pizza" in csv_string
-    assert "2,Mario's Deli" in csv_string
+
+    with patch("fetcher.time.sleep"):  # Skip actual sleep in tests
+        result = fetch_page_with_retry(
+            session=mock_session,
+            base_url="https://test.domain/resource/test.csv",
+            params={"$limit": 50000, "$offset": 0},
+            headers={},
+            page=0,
+        )
+
+    assert result == mock_response
+    assert mock_session.get.call_count == 2
 
 
-# -------------------------------------------------------
-# SECTION 2: Test Fetching Logic (httpx mocking)
-# -------------------------------------------------------
-@pytest.mark.asyncio
-@patch("fetcher.httpx.AsyncClient")
-async def test_fetch_all_records(mock_async_client_class):
+def test_fetch_page_with_retry_raises_after_max_retries():
     """
-    Test that fetch_all_records paginates correctly.
-    We mock the async httpx client to return one page of data,
-    then an empty page to break the loop.
+    fetch_page_with_retry() should raise after MAX_PAGE_RETRIES
+    consecutive timeouts.
     """
-    # Create a mock for the client instance
-    mock_client = AsyncMock()
-    
-    # When using an async context manager (async with ...), we need to set up the return value
-    mock_async_client_class.return_value.__aenter__.return_value = mock_client
-    
-    # Setup the mock responses
-    mock_response_page_1 = MagicMock()
-    mock_response_page_1.json.return_value = [{"id": 1}, {"id": 2}]
-    
-    mock_response_page_2 = MagicMock()
-    mock_response_page_2.json.return_value = [] # Empty page stops the loop
-    
-    # client.get will return page_1 on first call, then page_2 on second call
-    mock_client.get.side_effect = [mock_response_page_1, mock_response_page_2]
-    
-    domain = "test.domain"
-    dataset_id = "test-dataset"
-    
-    records = await fetch_all_records(domain, dataset_id)
-    
-    # We should have received the two records from page 1
-    assert len(records) == 2
-    assert records[0]["id"] == 1
-    
-    # It should have called get() twice
-    assert mock_client.get.call_count == 2
-    
-    # Both calls should check raise_for_status
-    assert mock_response_page_1.raise_for_status.called
-    assert mock_response_page_2.raise_for_status.called
+    import requests
+
+    mock_session = MagicMock()
+    mock_session.get.side_effect = requests.exceptions.Timeout()
+
+    with patch("fetcher.time.sleep"):
+        with pytest.raises(requests.exceptions.Timeout):
+            fetch_page_with_retry(
+                session=mock_session,
+                base_url="https://test.domain/resource/test.csv",
+                params={"$limit": 50000, "$offset": 0},
+                headers={},
+                page=0,
+            )
 
 
 # -------------------------------------------------------
-# SECTION 3: Test Upload to GCS (google-cloud-storage mocking)
+# SECTION 3: stream_bulk_to_gcs()
 # -------------------------------------------------------
+
 @patch("fetcher.storage.Client")
 @patch("fetcher.GCS_BUCKET_NAME", "test-bucket")
-def test_upload_to_gcs(mock_storage_client_class):
+@patch("fetcher.make_session")
+def test_stream_bulk_to_gcs_uploads_to_gcs(mock_make_session, mock_storage_client_class):
     """
-    Test uploading bytes to GCS without making actual GCP calls.
+    stream_bulk_to_gcs() should download the CSV and upload it to GCS.
     """
-    # Set up the mock objects mapping to bucket and blob
+    # Mock the requests session and response
+    mock_session = MagicMock()
+    mock_make_session.return_value = mock_session
+
+    mock_response = MagicMock()
+    mock_response.iter_content.return_value = [b"col1,col2\n", b"val1,val2\n"]
+    mock_response.__enter__ = lambda s: mock_response
+    mock_response.__exit__ = MagicMock(return_value=False)
+    mock_session.get.return_value = mock_response
+
+    # Mock GCS
     mock_client = MagicMock()
     mock_bucket = MagicMock()
     mock_blob = MagicMock()
-    
     mock_storage_client_class.return_value = mock_client
     mock_client.bucket.return_value = mock_bucket
     mock_bucket.blob.return_value = mock_blob
-    
-    # Run the function
-    test_data = b"some,fake,csv,data"
-    result_url = upload_to_gcs(test_data, "raw/test.csv")
-    
-    # Verify the bucket was requested using our fake bucket name
-    mock_client.bucket.assert_called_once_with("test-bucket")
-    
-    # Verify the blob was created with the right filename
-    mock_bucket.blob.assert_called_once_with("raw/test.csv")
-    
-    # Verify it uploaded the exact bytes we provided as text/csv
-    mock_blob.upload_from_string.assert_called_once_with(test_data, content_type="text/csv")
-    
-    # Verify the returned URL is formatted correctly
-    assert result_url == "gs://test-bucket/raw/test.csv"
+
+    from fetcher import stream_bulk_to_gcs
+    result = stream_bulk_to_gcs("data.cityofnewyork.us", "w7w3-xahh", "raw/nyc-dca-businesses.csv")
+
+    # Verify GCS upload was called
+    mock_blob.upload_from_filename.assert_called_once()
+    assert result == "gs://test-bucket/raw/nyc-dca-businesses.csv"
 
 
 # -------------------------------------------------------
-# SECTION 4: Test Orchestrator (run)
+# SECTION 4: fetch_nys_paginated_to_gcs()
 # -------------------------------------------------------
-@pytest.mark.asyncio
-@patch("fetcher.fetch_all_records")
-@patch("fetcher.upload_to_gcs")
-async def test_run_orchestrator(mock_upload, mock_fetch):
+
+@patch("fetcher.storage.Client")
+@patch("fetcher.GCS_BUCKET_NAME", "test-bucket")
+@patch("fetcher.make_session")
+def test_fetch_nys_paginated_to_gcs_single_page(mock_make_session, mock_storage_client_class):
     """
-    Test the main run() function orchestrates fetching and uploading
-    for both the NYC and NYS datasets.
+    fetch_nys_paginated_to_gcs() should paginate and stop when
+    it gets fewer rows than PAGE_SIZE.
     """
-    # Mock return values for fetch_all_records
-    mock_fetch.side_effect = [
-        [{"id": "nyc1"}], # Return for NYC data
-        [{"id": "nys1"}]  # Return for NYS data
-    ]
-    
-    # Mock return values for upload_to_gcs
-    mock_upload.side_effect = [
-        "gs://test/nyc.csv",
-        "gs://test/nys.csv"
-    ]
-    
-    # Call the orchestrator
-    nyc_url, nys_url = await run()
-    
-    # Check that it fetched both datasets
-    assert mock_fetch.call_count == 2
-    
-    # Check that it uploaded both datasets
-    assert mock_upload.call_count == 2
-    
-    # Check that it returns the URLs generated by upload_to_gcs
+    mock_session = MagicMock()
+    mock_make_session.return_value = mock_session
+
+    # Simulate one page of results smaller than PAGE_SIZE
+    csv_content = "dos_id,current_entity_name,initial_dos_filing_date,dos_process_zip\n"
+    csv_content += "123,TEST CORP,2020-01-01,10001\n"
+    csv_content += "456,ANOTHER CORP,2019-05-15,11201\n"
+
+    mock_response = MagicMock()
+    mock_response.text = csv_content
+
+    with patch("fetcher.fetch_page_with_retry", return_value=mock_response):
+        mock_client = MagicMock()
+        mock_bucket = MagicMock()
+        mock_blob = MagicMock()
+        mock_storage_client_class.return_value = mock_client
+        mock_client.bucket.return_value = mock_bucket
+        mock_bucket.blob.return_value = mock_blob
+
+        from fetcher import fetch_nys_paginated_to_gcs
+        result = fetch_nys_paginated_to_gcs("raw/nys-corporations.csv")
+
+    mock_blob.upload_from_string.assert_called_once()
+    assert result == "gs://test-bucket/raw/nys-corporations.csv"
+
+
+@patch("fetcher.storage.Client")
+@patch("fetcher.GCS_BUCKET_NAME", "test-bucket")
+@patch("fetcher.make_session")
+def test_fetch_nys_paginated_stops_on_empty_page(mock_make_session, mock_storage_client_class):
+    """
+    fetch_nys_paginated_to_gcs() should stop paginating
+    when it receives an empty page.
+    """
+    mock_session = MagicMock()
+    mock_make_session.return_value = mock_session
+
+    # First page has data, second page is empty (just headers)
+    page1_csv = "dos_id,current_entity_name,initial_dos_filing_date,dos_process_zip\n"
+    for i in range(PAGE_SIZE):
+        page1_csv += f"{i},CORP {i},2020-01-01,10001\n"
+
+    page2_csv = "dos_id,current_entity_name,initial_dos_filing_date,dos_process_zip\n"
+
+    mock_resp1 = MagicMock()
+    mock_resp1.text = page1_csv
+    mock_resp2 = MagicMock()
+    mock_resp2.text = page2_csv
+
+    with patch("fetcher.fetch_page_with_retry", side_effect=[mock_resp1, mock_resp2]):
+        mock_client = MagicMock()
+        mock_bucket = MagicMock()
+        mock_blob = MagicMock()
+        mock_storage_client_class.return_value = mock_client
+        mock_client.bucket.return_value = mock_bucket
+        mock_bucket.blob.return_value = mock_blob
+
+        from fetcher import fetch_nys_paginated_to_gcs
+        result = fetch_nys_paginated_to_gcs("raw/nys-corporations.csv")
+
+    assert result == "gs://test-bucket/raw/nys-corporations.csv"
+
+
+# -------------------------------------------------------
+# SECTION 5: Constants
+# -------------------------------------------------------
+
+def test_nyc_counties_contains_all_boroughs():
+    """
+    NYC_COUNTIES should contain all 5 NYC borough county names
+    exactly as they appear in the Socrata dataset.
+    """
+    assert "New York" in NYC_COUNTIES   # Manhattan
+    assert "Kings" in NYC_COUNTIES      # Brooklyn
+    assert "Queens" in NYC_COUNTIES     # Queens
+    assert "Bronx" in NYC_COUNTIES      # Bronx
+    assert "Richmond" in NYC_COUNTIES   # Staten Island
+    assert len(NYC_COUNTIES) == 5
+
+
+def test_nys_columns_contains_required_fields():
+    """
+    NYS_COLUMNS should include all 4 columns we actually use
+    in the pipeline.
+    """
+    assert "dos_id" in NYS_COLUMNS
+    assert "current_entity_name" in NYS_COLUMNS
+    assert "initial_dos_filing_date" in NYS_COLUMNS
+    assert "dos_process_zip" in NYS_COLUMNS
+
+
+# -------------------------------------------------------
+# SECTION 6: run() orchestrator
+# -------------------------------------------------------
+
+@patch("fetcher.fetch_nys_paginated_to_gcs")
+@patch("fetcher.stream_bulk_to_gcs")
+def test_run_calls_both_fetchers(mock_bulk, mock_paginated):
+    """
+    run() should call stream_bulk_to_gcs for NYC data
+    and fetch_nys_paginated_to_gcs for NYS data.
+    """
+    mock_bulk.return_value = "gs://test/nyc.csv"
+    mock_paginated.return_value = "gs://test/nys.csv"
+
+    nyc_url, nys_url = run()
+
+    assert mock_bulk.call_count == 1
+    assert mock_paginated.call_count == 1
     assert nyc_url == "gs://test/nyc.csv"
     assert nys_url == "gs://test/nys.csv"
+
+
+@patch("fetcher.fetch_nys_paginated_to_gcs")
+@patch("fetcher.stream_bulk_to_gcs")
+def test_run_raises_if_nyc_fetch_fails(mock_bulk, mock_paginated):
+    """
+    run() should raise and not attempt the NYS fetch
+    if the NYC fetch fails.
+    """
+    mock_bulk.side_effect = Exception("NYC fetch failed")
+
+    with pytest.raises(Exception, match="NYC fetch failed"):
+        run()
+
+    mock_paginated.assert_not_called()
