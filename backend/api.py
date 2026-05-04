@@ -37,6 +37,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://laughing-space-sniffle-wjx466vrj56cw5g-3000.app.github.dev",
+        "https://kyb-pipeline.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
