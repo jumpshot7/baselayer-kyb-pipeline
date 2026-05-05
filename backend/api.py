@@ -348,7 +348,6 @@ def get_business_by_license(license_number: str):
             a.flag_entity_dormant,
             a.flag_address_mismatch,
             e.current_entity_name,
-            e.entity_type,
             e.date_of_dissolution
         FROM kyb_anomalies a
         JOIN nys_corp_entities e ON e.id = a.nys_entity_id
