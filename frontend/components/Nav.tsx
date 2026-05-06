@@ -16,7 +16,11 @@ export default function Nav() {
   return (
     <nav className={styles.nav}>
       <div className={styles.brand}>
-        <span className={styles.brandMark}>◆</span>
+        <img
+          className={styles.brandMark}
+          src="/favicon.ico"
+          alt="KYB logo"
+        />
         <span className={styles.brandName}>KYB<span className={styles.brandSub}>COMPLIANCE ENGINE</span></span>
       </div>
 
