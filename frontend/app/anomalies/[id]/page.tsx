@@ -83,7 +83,7 @@ export default function AnomalyDetailPage() {
           <span className={styles.scoreLabel}>MATCH SCORE</span>
           <span
             className={styles.scoreValue}
-            style={{ color: parseFloat(data.match_score) === 100 ? 'var(--accent-gold)' : 'var(--text-primary)' }}
+            style={{ color: parseFloat(data.match_score) === 100 ? 'var(--danger)' : 'var(--text-primary)' }}
           >
             {parseFloat(data.match_score).toFixed(0)}
           </span>
@@ -95,15 +95,15 @@ export default function AnomalyDetailPage() {
       <div
         className={styles.verdict}
         style={{
-          background: hasAny ? 'rgba(240,165,0,0.06)' : 'rgba(16,185,129,0.06)',
-          borderColor: hasAny ? 'rgba(240,165,0,0.3)' : 'rgba(16,185,129,0.3)',
+          background: hasAny ? 'rgba(244, 67, 54, 0.08)' : 'rgba(16,185,129,0.06)',
+          borderColor: hasAny ? 'rgba(244, 67, 54, 0.3)' : 'rgba(16,185,129,0.3)',
         }}
       >
-        <span style={{ color: hasAny ? 'var(--accent-gold)' : 'var(--success)', fontSize: 20 }}>
+        <span style={{ color: hasAny ? 'var(--danger)' : 'var(--success)', fontSize: 20 }}>
           {hasAny ? '⚠' : '✓'}
         </span>
         <div>
-          <p className={styles.verdictTitle} style={{ color: hasAny ? 'var(--accent-gold)' : 'var(--success)' }}>
+          <p className={styles.verdictTitle} style={{ color: hasAny ? 'var(--danger)' : 'var(--success)' }}>
             {hasAny ? 'ANOMALIES DETECTED' : 'NO ANOMALIES DETECTED'}
           </p>
           <p className={styles.verdictDesc}>
@@ -126,7 +126,7 @@ export default function AnomalyDetailPage() {
           </div>
           <div className={styles.fields}>
             <Field label="Business Name" value={nyc.business_name} />
-            <Field label="License Number" value={nyc.license_number} mono />
+            <Field label="License Number" value={nyc.license_number} primary />
             <Field label="License Type" value={nyc.license_type} />
             <Field
               label="License Status"
@@ -136,10 +136,10 @@ export default function AnomalyDetailPage() {
                 nyc.license_status === 'Expired' || nyc.license_status === 'Surrendered' ? 'danger' : undefined
               }
             />
-            <Field label="Initial Issuance Date" value={nyc.initial_issuance_date} mono />
-            <Field label="Expiration Date" value={nyc.expiration_date} mono />
+            <Field label="Initial Issuance Date" value={nyc.initial_issuance_date} primary />
+            <Field label="Expiration Date" value={nyc.expiration_date} primary />
             <Field label="Borough" value={nyc.borough} />
-            <Field label="ZIP Code" value={nyc.zip_code} mono />
+            <Field label="ZIP Code" value={nyc.zip_code} primary />
             <Field label="Business Category" value={nyc.business_category} />
           </div>
         </div>
@@ -152,9 +152,9 @@ export default function AnomalyDetailPage() {
           </div>
           <div className={styles.fields}>
             <Field label="Entity Name" value={nys.current_entity_name} />
-            <Field label="DOS ID" value={nys.dos_id} mono />    
-            <Field label="Date of Formation" value={nys.initial_dos_filing_date || nys.date_of_formation} mono />     
-            <Field label="ZIP Code" value={nys.zip_code} mono />
+            <Field label="DOS ID" value={nys.dos_id} primary />    
+            <Field label="Date of Formation" value={nys.initial_dos_filing_date || nys.date_of_formation} primary />     
+            <Field label="ZIP Code" value={nys.zip_code} primary />
             
           </div>
         </div>
@@ -200,10 +200,10 @@ export default function AnomalyDetailPage() {
   )
 }
 
-function Field({ label, value, mono, highlight }: {
+function Field({ label, value, primary, highlight }: {
   label: string
   value?: string
-  mono?: boolean
+  primary?: boolean
   highlight?: 'success' | 'danger'
 }) {
   const color = highlight === 'success' ? 'var(--success)'
@@ -214,7 +214,7 @@ function Field({ label, value, mono, highlight }: {
     <div className={styles.field}>
       <span className={styles.fieldLabel}>{label}</span>
       <span
-        className={`${styles.fieldValue} ${mono ? styles.fieldMono : ''}`}
+        className={`${styles.fieldValue} ${primary ? styles.fieldprimary : ''}`}
         style={{ color }}
       >
         {value || '—'}

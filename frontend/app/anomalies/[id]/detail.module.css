@@ -70,7 +70,7 @@
   font-family: var(--font-display);
   font-size: 14px;
   letter-spacing: 0.2em;
-  color: var(--accent-gold);
+  color: var(--danger);
   margin-bottom: 10px;
 }
 
