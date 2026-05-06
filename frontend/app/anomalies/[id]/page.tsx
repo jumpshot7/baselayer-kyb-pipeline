@@ -75,7 +75,7 @@ export default function AnomalyDetailPage() {
       {/* Header */}
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <p className={styles.eyebrow}>ANOMALY DETAIL</p>
+          <p className={styles.eyebrow}>ANOMALY DETAILS</p>
           <h1 className={styles.title}>{nyc.business_name}</h1>
           <p className={styles.subtitle}>Matched against → {nys.current_entity_name}</p>
         </div>

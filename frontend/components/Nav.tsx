@@ -35,11 +35,6 @@ export default function Nav() {
           </Link>
         ))}
       </div>
-
-      <div className={styles.badge}>
-        <span className={styles.dot} />
-        LIVE
-      </div>
     </nav>
   )
 }
